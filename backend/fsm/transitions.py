@@ -2,7 +2,17 @@
 
 from dataclasses import dataclass
 from typing import Callable, Any
-from fsm.states import RequestState
+from typing import Union
+from fsm.states import RequestState, SystemState
+
+AnyState = Union[RequestState, SystemState]
+
+@dataclass
+class Transition:
+    from_state: AnyState
+    to_state: AnyState
+    condition: Callable[[dict], bool]
+    description: str
 
 
 @dataclass
@@ -133,5 +143,55 @@ TRANSITIONS: list[Transition] = [
     Transition(
         RequestState.AUDIT_LOGGING, RequestState.CLOSED,
         always, "Request lifecycle complete"
+    ),
+]
+# --- Safe Mode FSM rulebook (system health, independent of any request) ---
+
+from fsm.states import SystemState
+
+
+def system_unhealthy(ctx: dict) -> bool:
+    return ctx.get("system_healthy", True) is False
+
+
+def system_critical(ctx: dict) -> bool:
+    return ctx.get("critical_failure", False) is True
+
+
+def system_recovered(ctx: dict) -> bool:
+    return (
+        ctx.get("system_healthy", True) is True
+        and ctx.get("critical_failure", False) is not True
+    )
+
+
+SYSTEM_TRANSITIONS: list[Transition] = [
+
+    Transition(
+        SystemState.SYSTEM_NORMAL, SystemState.DEGRADED_WARNING,
+        system_unhealthy, "Component failure detected, entering degraded warning"
+    ),
+
+    Transition(
+        SystemState.DEGRADED_WARNING, SystemState.SAFE_MODE_ACTIVE,
+        system_critical, "Critical failure confirmed, activating safe mode"
+    ),
+    Transition(
+        SystemState.DEGRADED_WARNING, SystemState.SYSTEM_NORMAL,
+        system_recovered, "Component recovered before reaching critical, returning to normal"
+    ),
+
+    Transition(
+        SystemState.SAFE_MODE_ACTIVE, SystemState.RESTORING,
+        system_recovered, "Services reported healthy, beginning restoration"
+    ),
+
+    Transition(
+        SystemState.RESTORING, SystemState.SYSTEM_NORMAL,
+        system_recovered, "Restoration confirmed stable, returning to normal operation"
+    ),
+    Transition(
+        SystemState.RESTORING, SystemState.SAFE_MODE_ACTIVE,
+        system_unhealthy, "Restoration failed, reverting to safe mode"
     ),
 ]
