@@ -38,3 +38,16 @@ class SystemAwareRequestProcessor:
         ):
             self.process(request_fsm, context)
         return request_fsm.state
+    # backend/core/orchestrator.py — add this method to SystemAwareRequestProcessor
+
+    def transition_system(self, context: dict):
+        """
+        Advances the shared RecoveryFSM and logs the resulting
+        transition, the same way process() does for request FSMs.
+        Use this instead of calling recovery_fsm.transition()
+        directly, so system health changes are never invisible to
+        the audit trail.
+        """
+        new_state = self.recovery_fsm.transition(context)
+        self.logger.log_system_transition(self.recovery_fsm.history[-1])
+        return new_state
