@@ -1,0 +1,42 @@
+# docker-compose.yml
+# Local development services for GovernAI. Not used by the app yet -
+# Phase 3 will wire the backend to connect to these. Standing them up
+# now means "start the database" is a solved problem before it's needed.
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: governai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: governai
+      POSTGRES_PASSWORD: governai_dev_password
+      POSTGRES_DB: governai
+    ports:
+      - "5432:5432"
+    volumes:
+      - governai_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U governai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: governai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - governai_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  governai_postgres_data:
+  governai_redis_data:
