@@ -29,7 +29,7 @@ def is_authorized(ctx: dict) -> bool:
     clearance = ctx.get("clearance", 0)
     required = ctx.get("required_clearance", 0)
     risk = ctx.get("risk_score", 0)
-    return clearance >= required and risk < 40
+    return not is_hard_denied(ctx) and clearance >= required and risk < 40
 
 
 def needs_escalation(ctx: dict) -> bool:
