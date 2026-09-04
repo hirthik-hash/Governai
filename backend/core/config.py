@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     hard_denial_risk_threshold: int = 85
     escalation_risk_threshold: int = 40
 
+    # backend/core/config.py — add this field to the Settings class
+
+    # Logging
+    log_level: str = "INFO"
+
     def is_production(self) -> bool:
         return self.app_env == "production"
 
