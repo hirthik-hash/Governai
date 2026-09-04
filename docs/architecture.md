@@ -199,3 +199,31 @@ As of Day 16: **60 passing tests** across:
 - Frontend (Next.js dashboard)
 - Real health-check logic driving `RecoveryFSM` (currently only reacts
   to manually-passed `system_healthy`/`critical_failure` flags)
+
+  ---
+
+## Version History
+
+### v0.1-fsm-core (Phase 1 complete — Days 1–19)
+
+- Both FSMs fully implemented (`GovernanceFSM`, `RecoveryFSM`) on a
+  shared `BaseFSM` engine
+- Full request lifecycle: parsing, ambiguity/clarification loop,
+  validation, authorization, escalation, manager review, hard denial,
+  audit logging
+- Safe Mode FSM: warning → safe mode → restoring → normal, with a
+  safe-mode gate (`SystemAwareRequestProcessor`) blocking sensitive
+  access during degradation
+- Unified `DecisionLogger` capturing request transitions, system
+  transitions, and safe-mode blocks
+- `EscalationTimeoutTracker` scaffolding (clock-injectable, not yet
+  wired to a real agent)
+- CLI harness (`cli.py`) for manual scenario testing
+- 69 passing tests, 96% line coverage across `fsm/` and `core/`
+- Two real bugs found and fixed during testing (see "Real bugs this
+  design caught" above) — most notably a blacklist/authorization
+  rule overlap that the ambiguity-detection safety net caught before
+  it could become a silent security gap
+
+**Not yet built:** any of the 7 agents, database persistence, API
+layer, frontend, or real health-check logic driving `RecoveryFSM`.
