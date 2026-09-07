@@ -1,5 +1,30 @@
 # backend/agents/request_agent.py — full replacement
+# backend/agents/request_agent.py
 
+"""
+Request Understanding Agent (GovernAI Agent 1 of 7).
+
+Takes a structured access request and produces the classification
+data GovernanceFSM needs to make a decision. Three input shapes are
+supported:
+
+  - Exact lookup:    {"user_id": ..., "resource_id": ...}
+  - Fuzzy lookup:     {"user_id": ..., "resource_name": ...}
+  - Either + urgency: add "urgency": "low"|"normal"|"high" (default "normal")
+
+Fuzzy resource_name lookups may be genuinely ambiguous (multiple
+resources match) - in that case this agent returns success=True with
+ambiguity_flag=True and a list of candidate_resource_ids, which feeds
+directly into the FSM's CLARIFICATION_REQUESTED loop rather than
+guessing which resource was meant.
+
+Deliberately does NOT do free-text NLP or infer urgency/intent from
+unstructured input - see Day 26/28 design notes in chat history for
+why. All inputs are explicit and structured; if free-text parsing is
+ever added, it belongs in a new method or a later agent (candidate
+for Phase 4's Ollama-backed Policy Intelligence Agent), not bolted
+onto this one.
+"""
 from agents.base_agent import BaseAgent, AgentResult
 from data.seed_data import get_user, get_resource, SEED_RESOURCES
 
