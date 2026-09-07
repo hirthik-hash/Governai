@@ -1,7 +1,101 @@
 # backend/tests/test_validation_agent.py
 
 from agents.validation_agent import AccessValidationAgent
+# backend/tests/test_validation_agent.py — append this class
 
+from datetime import datetime
+
+
+class TestAccessValidationAgentAfterHours:
+
+    def test_business_hours_weekday_not_flagged(self):
+        # Wednesday 2:00 PM
+        fixed_now = lambda: datetime(2026, 9, 9, 14, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+        })
+
+        assert result.data["after_hours_access"] is False
+
+    def test_late_night_weekday_flagged_for_top_secret(self):
+        # Wednesday 11:00 PM
+        fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+        })
+
+        assert result.data["after_hours_access"] is True
+
+    def test_weekend_flagged_for_restricted(self):
+        # Saturday 10:00 AM - within "business hours" clock time but wrong day
+        fixed_now = lambda: datetime(2026, 9, 12, 10, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "restricted",
+        })
+
+        assert result.data["after_hours_access"] is True
+
+    def test_after_hours_not_flagged_for_public_resource(self):
+        fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 0,
+            "resource_sensitivity": "public",
+        })
+
+        assert result.data["after_hours_access"] is False
+
+    def test_after_hours_not_flagged_for_internal_resource(self):
+        fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 1,
+            "resource_sensitivity": "internal",
+        })
+
+        assert result.data["after_hours_access"] is False
+
+    def test_exact_boundary_start_of_business_hours_counts_as_business_hours(self):
+        # Exactly 8:00 AM Wednesday
+        fixed_now = lambda: datetime(2026, 9, 9, 8, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+        })
+
+        assert result.data["after_hours_access"] is False
+
+    def test_reasoning_mentions_after_hours_when_flagged(self):
+        fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+        })
+
+        assert "business hours" in result.reasoning.lower()
+
+    def test_default_now_fn_used_when_not_injected(self):
+        """
+        Confirms the agent works without explicit clock injection too -
+        just uses real current time, same pattern as
+        EscalationTimeoutTracker's default.
+        """
+        agent = AccessValidationAgent()
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "public",
+        })
+
+        assert result.success is True
+        assert "after_hours_access" in result.data
 
 class TestAccessValidationAgentBasicClearance:
 
