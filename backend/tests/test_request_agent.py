@@ -309,3 +309,20 @@ class TestRequestUnderstandingAgentRobustness:
         # -- but the outer spaces themselves aren't in "Employee Handbook",
         # so this depends on exact match direction. Verifying actual behavior:
         assert result.success is False or result.data.get("resolved_resource_id") == "resource-001"
+    # backend/tests/test_request_agent.py — replace the loose test
+
+    def test_name_match_does_not_strip_whitespace_from_query(self):
+        """
+        Documents current behavior explicitly: resource_name is not
+        stripped before matching, so a query with stray leading/
+        trailing whitespace fails to match even when the real content
+        would otherwise match cleanly. This is a deliberate choice to
+        record, not an accident - if this test ever needs to change,
+        it means someone intentionally added stripping to
+        find_resources_by_name.
+        """
+        agent = RequestUnderstandingAgent()
+        result = agent.process({"user_id": "user-001", "resource_name": "  Handbook  "})
+
+        assert result.success is False
+        assert "no resource" in result.reasoning.lower() or "no resource" in " ".join(result.errors).lower()
