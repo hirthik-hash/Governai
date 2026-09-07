@@ -1,9 +1,11 @@
 # backend/tests/test_validation_agent.py
 
-from agents.validation_agent import AccessValidationAgent
-# backend/tests/test_validation_agent.py — append this class
-
 from datetime import datetime
+
+from agents.validation_agent import (
+    AccessValidationAgent,
+    SessionValidator,
+)
 
 
 class TestAccessValidationAgentAfterHours:
@@ -13,8 +15,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 14, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is False
@@ -24,8 +28,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is True
@@ -35,8 +41,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 12, 10, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "restricted",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is True
@@ -45,8 +53,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 0,
+            "clearance": 5,
+            "required_clearance": 0,
             "resource_sensitivity": "public",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is False
@@ -55,8 +65,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 1,
+            "clearance": 5,
+            "required_clearance": 1,
             "resource_sensitivity": "internal",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is False
@@ -66,8 +78,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 8, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["after_hours_access"] is False
@@ -76,8 +90,10 @@ class TestAccessValidationAgentAfterHours:
         fixed_now = lambda: datetime(2026, 9, 9, 23, 0)
         agent = AccessValidationAgent(now_fn=fixed_now)
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert "business hours" in result.reasoning.lower()
@@ -90,18 +106,25 @@ class TestAccessValidationAgentAfterHours:
         """
         agent = AccessValidationAgent()
         result = agent.process({
-            "clearance": 5, "required_clearance": 2,
+            "clearance": 5,
+            "required_clearance": 2,
             "resource_sensitivity": "public",
+            "session_token": "abc123",
         })
 
         assert result.success is True
         assert "after_hours_access" in result.data
 
+
 class TestAccessValidationAgentBasicClearance:
 
     def test_sufficient_clearance_passes(self):
         agent = AccessValidationAgent()
-        result = agent.process({"clearance": 3, "required_clearance": 2})
+        result = agent.process({
+            "clearance": 3,
+            "required_clearance": 2,
+            "session_token": "abc123",
+        })
 
         assert result.success is True
         assert result.data["clearance_sufficient"] is True
@@ -109,14 +132,22 @@ class TestAccessValidationAgentBasicClearance:
 
     def test_insufficient_clearance_without_role_fails_check(self):
         agent = AccessValidationAgent()
-        result = agent.process({"clearance": 1, "required_clearance": 3})
+        result = agent.process({
+            "clearance": 1,
+            "required_clearance": 3,
+            "session_token": "abc123",
+        })
 
         assert result.success is True  # the agent itself succeeded at reasoning
         assert result.data["clearance_sufficient"] is False
 
     def test_exact_clearance_match_passes(self):
         agent = AccessValidationAgent()
-        result = agent.process({"clearance": 2, "required_clearance": 2})
+        result = agent.process({
+            "clearance": 2,
+            "required_clearance": 2,
+            "session_token": "abc123",
+        })
 
         assert result.data["clearance_sufficient"] is True
 
@@ -137,6 +168,7 @@ class TestAccessValidationAgentRoleOverride:
             "required_clearance": 5,
             "role": "CISO",
             "resource_sensitivity": "security",
+            "session_token": "abc123",
         })
 
         assert result.data["clearance_sufficient"] is True
@@ -149,6 +181,7 @@ class TestAccessValidationAgentRoleOverride:
             "required_clearance": 5,
             "role": "CISO",
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["role_override_applied"] is True
@@ -160,6 +193,7 @@ class TestAccessValidationAgentRoleOverride:
             "required_clearance": 5,
             "role": "CISO",
             "resource_sensitivity": "internal",
+            "session_token": "abc123",
         })
 
         assert result.data["clearance_sufficient"] is False
@@ -172,6 +206,7 @@ class TestAccessValidationAgentRoleOverride:
             "required_clearance": 5,
             "role": "Software Engineer",
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["role_override_applied"] is False
@@ -188,6 +223,7 @@ class TestAccessValidationAgentRoleOverride:
             "required_clearance": 2,
             "role": "CISO",
             "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
         })
 
         assert result.data["clearance_sufficient"] is True
@@ -206,7 +242,10 @@ class TestAccessValidationAgentIntegratesWithRequestAgent:
         })
 
         validation_agent = AccessValidationAgent()
-        validation_result = validation_agent.process(request_result.data)
+        validation_result = validation_agent.process({
+            **request_result.data,
+            "session_token": "abc123",
+        })
 
         assert validation_result.success is True
         assert validation_result.data["clearance_sufficient"] is False
@@ -223,7 +262,10 @@ class TestAccessValidationAgentIntegratesWithRequestAgent:
         })
 
         validation_agent = AccessValidationAgent()
-        validation_result = validation_agent.process(request_result.data)
+        validation_result = validation_agent.process({
+            **request_result.data,
+            "session_token": "abc123",
+        })
 
         context = request_result.data.copy()
         context.update(validation_result.data)
@@ -233,3 +275,106 @@ class TestAccessValidationAgentIntegratesWithRequestAgent:
         final_state = fsm.run_until_stuck(context)
 
         assert final_state == RequestState.CLOSED
+
+
+class TestSessionValidatorDefault:
+
+    def test_missing_token_is_invalid(self):
+        validator = SessionValidator()
+        is_valid, reason = validator.is_valid({})
+
+        assert is_valid is False
+        assert "no session token" in reason.lower()
+
+    def test_present_token_not_expired_is_valid(self):
+        validator = SessionValidator()
+        is_valid, reason = validator.is_valid({
+            "session_token": "abc123",
+        })
+
+        assert is_valid is True
+
+    def test_expired_token_is_invalid(self):
+        validator = SessionValidator()
+        is_valid, reason = validator.is_valid({
+            "session_token": "abc123",
+            "session_expired": True,
+        })
+
+        assert is_valid is False
+        assert "expired" in reason.lower()
+
+
+class TestAccessValidationAgentSessionChecks:
+
+    def test_missing_session_token_fails_the_agent(self):
+        agent = AccessValidationAgent()
+        result = agent.process({
+            "clearance": 5,
+            "required_clearance": 2,
+        })
+
+        assert result.success is False
+        assert "session" in result.reasoning.lower()
+
+    def test_expired_session_fails_even_with_sufficient_clearance(self):
+        agent = AccessValidationAgent()
+        result = agent.process({
+            "clearance": 5,
+            "required_clearance": 2,
+            "session_token": "abc123",
+            "session_expired": True,
+        })
+
+        assert result.success is False
+        assert "expired" in result.errors[0].lower()
+
+    def test_valid_session_with_sufficient_clearance_succeeds(self):
+        agent = AccessValidationAgent()
+        result = agent.process({
+            "clearance": 5,
+            "required_clearance": 2,
+            "session_token": "abc123",
+        })
+
+        assert result.success is True
+        assert result.data["session_valid"] is True
+
+    def test_custom_session_validator_can_be_injected(self):
+        """
+        Confirms the validator is genuinely swappable - Phase 3 will
+        inject a real JWT-checking validator this same way.
+        """
+
+        class AlwaysValidValidator(SessionValidator):
+            def is_valid(self, input_data):
+                return True, "Always valid (test double)"
+
+        agent = AccessValidationAgent(
+            session_validator=AlwaysValidValidator()
+        )
+
+        result = agent.process({
+            "clearance": 5,
+            "required_clearance": 2,
+            # deliberately no session_token - the injected validator
+            # should be consulted instead of the default logic
+        })
+
+        assert result.success is True
+
+    def test_session_failure_is_distinguishable_from_clearance_failure(self):
+        """
+        A session failure and a clearance failure should not look the
+        same in the output - the Explainability Center will need to
+        tell these apart.
+        """
+        agent = AccessValidationAgent()
+
+        session_failure = agent.process({
+            "clearance": 5,
+            "required_clearance": 2,
+        })
+
+        assert "session" in session_failure.reasoning.lower()
+        assert "clearance" not in session_failure.errors[0].lower()

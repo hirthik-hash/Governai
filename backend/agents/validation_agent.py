@@ -14,9 +14,11 @@ already does that arithmetic correctly. Its value is:
   2. Applying role-based overrides that a simple numeric clearance
      threshold cannot express (e.g. a CISO's role grants scope over
      security-classified resources regardless of raw clearance).
+  3. Flagging after-hours access to sensitive resources.
+  4. Checking session/token validity through a swappable validator.
 
 This agent does not itself grant or deny access - it enriches the
-context with a `role_override_applied` flag and reasoning that later
+context with validation results and reasoning that later
 agents/humans can inspect, while the FSM remains the sole authority
 on the actual decision.
 """
@@ -51,24 +53,52 @@ def is_business_hours(dt: datetime) -> bool:
     )
 
 
-# Roles that bypass department-scope concerns for a specific resource
-# sensitivity, regardless of their raw numeric clearance level. Kept
-# small and explicit on purpose - this is not a general permissions
-# matrix, just the one clear override case worth encoding today.
+class SessionValidator:
+    """
+    Minimal, swappable session/token validity check. This default
+    implementation only checks for a non-empty session_token and an
+    explicit session_expired flag - no real JWT verification, since
+    that infrastructure doesn't exist until Phase 3 (Days 76-77).
+
+    Phase 3 should subclass or replace this with one that validates
+    real JWTs against core.config.settings.jwt_secret_key, without
+    requiring any change to AccessValidationAgent's own code - only
+    to whatever constructs it.
+    """
+
+    def is_valid(self, input_data: dict) -> tuple[bool, str]:
+        """Returns (is_valid, reason)."""
+        session_token = input_data.get("session_token")
+        session_expired = input_data.get("session_expired", False)
+
+        if not session_token:
+            return False, "No session token provided"
+
+        if session_expired:
+            return False, "Session token has expired"
+
+        return True, "Session valid"
 
 
 class AccessValidationAgent(BaseAgent):
     """
     Permission gatekeeper: takes the output of RequestUnderstandingAgent
-    and produces an explicit RBAC explanation, applying any role-based
-    overrides, and flags after-hours access to sensitive resources.
-    Does not change clearance/required_clearance in the context -
-    the FSM remains the actual decision-maker.
+    and produces an explicit RBAC explanation, applies role-based
+    overrides, flags after-hours access to sensitive resources, and
+    checks session validity. Does not itself deny access - the FSM
+    remains the actual decision-maker.
     """
 
-    def __init__(self, now_fn: Callable[[], datetime] = None):
+    def __init__(
+        self,
+        now_fn: Callable[[], datetime] = None,
+        session_validator: SessionValidator = None,
+    ):
         super().__init__()
         self._now_fn = now_fn or datetime.now
+        self._session_validator = (
+            session_validator or SessionValidator()
+        )
 
     @property
     def agent_name(self) -> str:
@@ -89,6 +119,16 @@ class AccessValidationAgent(BaseAgent):
                 ],
             )
 
+        session_valid, session_reason = (
+            self._session_validator.is_valid(input_data)
+        )
+
+        if not session_valid:
+            return self._failure(
+                f"Session validation failed: {session_reason}",
+                errors=[session_reason],
+            )
+
         clearance_sufficient = clearance >= required_clearance
 
         role_override_applied = False
@@ -107,6 +147,7 @@ class AccessValidationAgent(BaseAgent):
 
         now = self._now_fn()
         after_hours = not is_business_hours(now)
+
         after_hours_flagged = (
             after_hours
             and resource_sensitivity in AFTER_HOURS_SENSITIVE_LEVELS
@@ -118,9 +159,10 @@ class AccessValidationAgent(BaseAgent):
             ),
             "role_override_applied": role_override_applied,
             "after_hours_access": after_hours_flagged,
+            "session_valid": True,
         }
 
-        reasoning_parts = []
+        reasoning_parts = ["Session valid"]
 
         if role_override_applied:
             reasoning_parts.append(override_reason)
