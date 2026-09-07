@@ -98,3 +98,66 @@ class TestRequestAgentOutputFeedsFsm:
         final_state = fsm.run_until_stuck(context)
 
         assert final_state == RequestState.CLOSED
+
+# backend/tests/test_request_agent.py — append this class
+
+class TestRequestUnderstandingAgentAmbiguousNameLookup:
+
+    def test_unique_name_match_resolves_immediately(self):
+        agent = RequestUnderstandingAgent()
+        # "Handbook" only matches "Employee Handbook"
+        result = agent.process({"user_id": "user-001", "resource_name": "Handbook"})
+
+        assert result.success is True
+        assert result.data["ambiguity_flag"] is False
+        assert result.data["resolved_resource_id"] == "resource-001"
+
+    def test_ambiguous_name_sets_ambiguity_flag(self):
+        agent = RequestUnderstandingAgent()
+        # "Report" or similar broad terms could match multiple - using
+        # a query guaranteed to hit 2+ seed resources for this test
+        result = agent.process({"user_id": "user-001", "resource_name": "e"})
+
+        # 'e' is deliberately broad - matches many resource names
+        assert result.success is True
+        assert result.data["ambiguity_flag"] is True
+        assert len(result.data["candidate_resource_ids"]) > 1
+
+    def test_no_match_fails_gracefully(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({"user_id": "user-001", "resource_name": "Nonexistent Thing XYZ"})
+
+        assert result.success is False
+
+    def test_resource_id_takes_precedence_over_resource_name(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({
+            "user_id": "user-001",
+            "resource_id": "resource-001",
+            "resource_name": "e",  # would be ambiguous alone, should be ignored
+        })
+
+        assert result.data["ambiguity_flag"] is False
+        assert result.data["resolved_resource_id"] == "resource-001"
+
+    def test_ambiguous_result_feeds_fsm_into_clarification_state(self):
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+
+        agent = RequestUnderstandingAgent()
+        result = agent.process({"user_id": "user-001", "resource_name": "e"})
+
+        context = result.merge_into_context({"risk_score": 10})
+        fsm = GovernanceFSM(request_id="ambiguity-test-001")
+        fsm.transition(context)  # -> REQUEST_RECEIVED
+        fsm.transition(context)  # -> PARSING_REQUEST
+        new_state = fsm.transition(context)  # ambiguous -> CLARIFICATION_REQUESTED
+
+        assert new_state == RequestState.CLARIFICATION_REQUESTED
+
+    def test_missing_both_resource_fields_fails(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({"user_id": "user-001"})
+
+        assert result.success is False
+        assert "resource_id or resource_name" in result.errors[0]
