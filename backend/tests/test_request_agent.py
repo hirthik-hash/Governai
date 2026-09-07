@@ -161,3 +161,69 @@ class TestRequestUnderstandingAgentAmbiguousNameLookup:
 
         assert result.success is False
         assert "resource_id or resource_name" in result.errors[0]
+
+# backend/tests/test_request_agent.py — append this class
+
+class TestRequestUnderstandingAgentUrgency:
+
+    def test_urgency_defaults_to_normal_when_omitted(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({"user_id": "user-001", "resource_id": "resource-001"})
+
+        assert result.data["urgency"] == "normal"
+
+    def test_explicit_high_urgency_is_captured(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({
+            "user_id": "user-001", "resource_id": "resource-001", "urgency": "high",
+        })
+
+        assert result.data["urgency"] == "high"
+
+    def test_invalid_urgency_fails_gracefully(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({
+            "user_id": "user-001", "resource_id": "resource-001", "urgency": "asap!!",
+        })
+
+        assert result.success is False
+        assert "urgency" in result.errors[0].lower()
+
+    def test_urgency_is_captured_even_in_ambiguous_results(self):
+        agent = RequestUnderstandingAgent()
+        result = agent.process({
+            "user_id": "user-001", "resource_name": "e", "urgency": "high",
+        })
+
+        assert result.data["ambiguity_flag"] is True
+        assert result.data["urgency"] == "high"
+
+
+class TestRequestUnderstandingAgentFullIntegration:
+
+    def test_realistic_multi_field_request_end_to_end(self):
+        """
+        Exercises Parts 1-3 together: a real user, resolving a resource
+        by name (unique match), with explicit high urgency, feeding
+        straight into a real FSM run.
+        """
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+
+        agent = RequestUnderstandingAgent()
+        result = agent.process({
+            "user_id": "user-010",  # Layla Hassan, Finance Director, clearance 4
+            "resource_name": "Financial Report",  # resolves to resource-003, requires 3
+            "urgency": "high",
+        })
+
+        assert result.success is True
+        assert result.data["ambiguity_flag"] is False
+        assert result.data["urgency"] == "high"
+        assert result.data["resolved_resource_id"] == "resource-003"
+
+        context = result.merge_into_context({"risk_score": 15})
+        fsm = GovernanceFSM(request_id="integration-test-001")
+        final_state = fsm.run_until_stuck(context)
+
+        assert final_state == RequestState.CLOSED

@@ -116,3 +116,117 @@ class RequestUnderstandingAgent(BaseAgent):
             reasoning += " [cross-department request]"
 
         return self._success(data, reasoning)
+
+# backend/agents/request_agent.py — modifications
+
+VALID_URGENCY_LEVELS = {"low", "normal", "high"}
+
+
+class RequestUnderstandingAgent(BaseAgent):
+    """
+    First-contact agent: takes a structured request and produces the
+    classification data the FSM context needs. Accepts either an
+    exact resource_id or a fuzzy resource_name (which may be
+    ambiguous), and an optional urgency level. Does not infer
+    urgency or intent from free text - all inputs are explicit and
+    structured, consistent with this agent's design throughout.
+    """
+
+    @property
+    def agent_name(self) -> str:
+        return "request_understanding"
+
+    def process(self, input_data: dict) -> AgentResult:
+        user_id = input_data.get("user_id")
+        resource_id = input_data.get("resource_id")
+        resource_name = input_data.get("resource_name")
+        urgency = input_data.get("urgency", "normal")
+
+        if urgency not in VALID_URGENCY_LEVELS:
+            return self._failure(
+                f"Invalid urgency level: {urgency}",
+                errors=[f"urgency must be one of {sorted(VALID_URGENCY_LEVELS)}, got '{urgency}'"],
+            )
+
+        if not user_id:
+            return self._failure(
+                "Missing required field",
+                errors=["user_id is required"],
+            )
+
+        if not resource_id and not resource_name:
+            return self._failure(
+                "Missing required field",
+                errors=["either resource_id or resource_name is required"],
+            )
+
+        try:
+            user = get_user(user_id)
+        except ValueError:
+            return self._failure(
+                f"Unknown user_id: {user_id}",
+                errors=[f"No user found with id {user_id}"],
+            )
+
+        if resource_id:
+            try:
+                resource = get_resource(resource_id)
+            except ValueError:
+                return self._failure(
+                    f"Unknown resource_id: {resource_id}",
+                    errors=[f"No resource found with id {resource_id}"],
+                )
+            return self._build_success_result(user, resource, urgency)
+
+        matches = find_resources_by_name(resource_name)
+
+        if len(matches) == 0:
+            return self._failure(
+                f"No resource matches name: {resource_name}",
+                errors=[f"No resource found matching '{resource_name}'"],
+            )
+
+        if len(matches) > 1:
+            candidate_ids = [r.id for r in matches]
+            candidate_names = [r.name for r in matches]
+            return self._success(
+                data={
+                    "ambiguity_flag": True,
+                    "clearance": user.clearance_level,
+                    "blacklist_match": user.is_blacklisted,
+                    "candidate_resource_ids": candidate_ids,
+                    "urgency": urgency,
+                },
+                reasoning=(
+                    f"'{resource_name}' matches {len(matches)} resources "
+                    f"({', '.join(candidate_names)}) - clarification needed"
+                ),
+            )
+
+        return self._build_success_result(user, matches[0], urgency)
+
+    def _build_success_result(self, user, resource, urgency: str) -> AgentResult:
+        cross_department = user.department != resource.department
+
+        data = {
+            "clearance": user.clearance_level,
+            "required_clearance": resource.required_clearance,
+            "blacklist_match": user.is_blacklisted,
+            "ambiguity_flag": False,
+            "cross_department_request": cross_department,
+            "requester_department": user.department,
+            "resource_department": resource.department,
+            "resource_sensitivity": resource.sensitivity.value,
+            "resolved_resource_id": resource.id,
+            "urgency": urgency,
+        }
+
+        reasoning = (
+            f"{user.name} ({user.department}, clearance {user.clearance_level}) "
+            f"requesting '{resource.name}' ({resource.sensitivity.value}, "
+            f"requires clearance {resource.required_clearance}), urgency={urgency}"
+        )
+        if cross_department:
+            reasoning += " [cross-department request]"
+
+        return self._success(data, reasoning)
