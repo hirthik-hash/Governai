@@ -378,3 +378,118 @@ class TestAccessValidationAgentSessionChecks:
 
         assert "session" in session_failure.reasoning.lower()
         assert "clearance" not in session_failure.errors[0].lower()
+from datetime import datetime as dt
+
+
+class TestAccessValidationAgentCheckOrdering:
+
+    def test_session_failure_takes_precedence_over_clearance_failure(self):
+        """
+        Both problems exist at once: no session token AND insufficient
+        clearance. Documents that session is checked first, so that's
+        the failure reason reported - this is a deliberate ordering
+        choice (can't reason about permissions for an unauthenticated
+        request), not an accident, and this test locks it in.
+        """
+        agent = AccessValidationAgent()
+        result = agent.process({
+            "clearance": 1, "required_clearance": 5,
+            # no session_token provided
+        })
+
+        assert result.success is False
+        assert "session" in result.reasoning.lower()
+
+    def test_expired_session_with_no_token_reports_missing_token_first(self):
+        """
+        session_expired=True is meaningless without a token in the
+        first place - SessionValidator checks token presence before
+        expiry, so 'no token' should win over 'expired'.
+        """
+        validator = SessionValidator()
+        is_valid, reason = validator.is_valid({"session_expired": True})
+
+        assert is_valid is False
+        assert "no session token" in reason.lower()
+
+
+class TestAccessValidationAgentBusinessHoursEndBoundary:
+
+    def test_exact_boundary_end_of_business_hours_counts_as_business_hours(self):
+        # Exactly 6:00 PM Wednesday
+        fixed_now = lambda: dt(2026, 9, 9, 18, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
+        })
+
+        assert result.data["after_hours_access"] is False
+
+    def test_one_minute_after_business_hours_end_is_after_hours(self):
+        # 6:01 PM Wednesday
+        fixed_now = lambda: dt(2026, 9, 9, 18, 1)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+        result = agent.process({
+            "clearance": 5, "required_clearance": 2,
+            "resource_sensitivity": "top_secret",
+            "session_token": "abc123",
+        })
+
+        assert result.data["after_hours_access"] is True
+
+
+class TestAccessValidationAgentAllFeaturesCombined:
+
+    def test_ciso_override_after_hours_valid_session_all_together(self):
+        """
+        Combines all three pieces this agent has built across Days
+        31-33: a CISO whose raw clearance is insufficient (needs the
+        role override), accessing after business hours (should be
+        flagged), with a valid session (should pass the gate).
+        """
+        # Sunday 10:00 PM - after hours by both day and time
+        fixed_now = lambda: dt(2026, 9, 13, 22, 0)
+        agent = AccessValidationAgent(now_fn=fixed_now)
+
+        result = agent.process({
+            "clearance": 1,
+            "required_clearance": 5,
+            "role": "CISO",
+            "resource_sensitivity": "top_secret",
+            "session_token": "valid-token-abc",
+        })
+
+        assert result.success is True
+        assert result.data["clearance_sufficient"] is True
+        assert result.data["role_override_applied"] is True
+        assert result.data["after_hours_access"] is True
+        assert result.data["session_valid"] is True
+
+    def test_full_chain_from_request_agent_through_validation_agent_after_hours(self):
+        """
+        End-to-end: RequestUnderstandingAgent's real output feeding
+        into AccessValidationAgent, at a fixed after-hours timestamp,
+        confirming the two agents compose correctly under this
+        specific combined scenario.
+        """
+        from agents.request_agent import RequestUnderstandingAgent
+
+        request_agent = RequestUnderstandingAgent()
+        request_result = request_agent.process({
+            "user_id": "user-007",  # James Whitfield, CISO, clearance 5
+            "resource_id": "resource-005",  # Salary Records, top_secret, requires 5
+        })
+
+        fixed_now = lambda: dt(2026, 9, 9, 23, 0)  # Wednesday 11 PM
+        validation_agent = AccessValidationAgent(now_fn=fixed_now)
+
+        combined_input = dict(request_result.data)
+        combined_input["session_token"] = "abc123"
+
+        validation_result = validation_agent.process(combined_input)
+
+        assert validation_result.success is True
+        assert validation_result.data["clearance_sufficient"] is True
+        assert validation_result.data["after_hours_access"] is True
