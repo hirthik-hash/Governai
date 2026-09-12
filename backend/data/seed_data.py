@@ -30,6 +30,8 @@ class User:
     clearance_level: int  # 0-5
     is_blacklisted: bool = False
 
+    reports_to: str = ""  # user_id of this user's direct approver, "" if none (top of chain)
+
 
 @dataclass
 class Resource:
@@ -48,17 +50,17 @@ class Resource:
 # multiple departments, plus one deliberately blacklisted user. ---
 
 SEED_USERS: list[User] = [
-    User(id="user-001", name="Alex Chen", department="engineering", role="Software Engineer", clearance_level=1),
-    User(id="user-002", name="Priya Nair", department="engineering", role="Team Lead", clearance_level=2),
-    User(id="user-003", name="Marcus Webb", department="finance", role="Financial Analyst", clearance_level=1),
-    User(id="user-004", name="Sofia Ricci", department="finance", role="Finance Manager", clearance_level=3),
-    User(id="user-005", name="David Okafor", department="hr", role="HR Coordinator", clearance_level=1),
-    User(id="user-006", name="Elena Petrova", department="hr", role="HR Director", clearance_level=4),
-    User(id="user-007", name="James Whitfield", department="security", role="CISO", clearance_level=5),
-    User(id="user-008", name="Rina Sato", department="engineering", role="Junior Developer", clearance_level=0),
+    User(id="user-001", name="Alex Chen", department="engineering", role="Software Engineer", clearance_level=1, reports_to="user-002"),
+    User(id="user-002", name="Priya Nair", department="engineering", role="Team Lead", clearance_level=2, reports_to="user-007"),
+    User(id="user-003", name="Marcus Webb", department="finance", role="Financial Analyst", clearance_level=1, reports_to="user-004"),
+    User(id="user-004", name="Sofia Ricci", department="finance", role="Finance Manager", clearance_level=3, reports_to="user-010"),
+    User(id="user-005", name="David Okafor", department="hr", role="HR Coordinator", clearance_level=1, reports_to="user-006"),
+    User(id="user-006", name="Elena Petrova", department="hr", role="HR Director", clearance_level=4, reports_to="user-007"),
+    User(id="user-007", name="James Whitfield", department="security", role="CISO", clearance_level=5, reports_to=""),
+    User(id="user-008", name="Rina Sato", department="engineering", role="Junior Developer", clearance_level=0, reports_to="user-002"),
     User(id="user-009", name="Tom Bracken", department="sales", role="Sales Rep", clearance_level=1,
-         is_blacklisted=True),  # flagged for a prior policy violation
-    User(id="user-010", name="Layla Hassan", department="finance", role="Director", clearance_level=4),
+         is_blacklisted=True, reports_to="user-010"),
+    User(id="user-010", name="Layla Hassan", department="finance", role="Director", clearance_level=4, reports_to="user-007"),
 ]
 
 
