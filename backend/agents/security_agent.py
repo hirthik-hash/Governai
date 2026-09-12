@@ -3,37 +3,30 @@
 """
 Security & Risk Intelligence Agent (GovernAI Agent 3 of 7).
 
-Computes a weighted risk score (0-100) from six behavioral/contextual
-factors, following the original design's risk formula:
+Computes a weighted risk score from behavioral risk factors, per the
+formula: risk_score = sum(triggered factor weights) / max_possible * 100.
 
-    risk_score = sum(weight for factor present) / sum(all weights) * 100
+Six factors exist in the full design (see FACTOR_WEIGHTS):
+  - Day 36: classification_jump, department_mismatch, unusual_hour
+    (stateless - computable from a single request's data)
+  - Day 37 (this version): repeated_failures, rapid_succession
+    (stateful - read from an injected RequestHistoryTracker)
+  - Day 38 adds geographic_anomaly.
 
-All six factor weights are defined from Day 1 of this agent's build
-(today) so the scoring scale never changes - only detection logic
-for individual factors gets added over Days 36-39. As of today,
-three factors have real detection logic (stateless - computable from
-Agent 1/2 output alone); the other three are defined but always
-evaluate to False until their detection logic is built:
+max_possible is fixed at the sum of ALL 6 weights (112) from day one,
+even before all 6 are implemented - this keeps risk_score's scale
+stable as more factors are added, rather than having every
+previously-scored request's relative risk shift when the denominator
+changes.
 
-    IMPLEMENTED (Day 36):
-      - department_mismatch   (from cross_department_request)
-      - unusual_hour          (from after_hours_access)
-      - classification_jump   (required_clearance - clearance >= 2)
-
-    NOT YET IMPLEMENTED (always False until their day arrives):
-      - repeated_failures     (Day 37 - needs a history tracker)
-      - rapid_succession      (Day 38 - needs request-timing history)
-      - geographic_anomaly    (Day 39 - needs a location stand-in)
-
-risk_level is a human-readable label only, for reasoning/display -
-the FSM itself acts on the raw risk_score, using the same thresholds
-already defined in core.config.settings (escalation_risk_threshold=40,
-hard_denial_risk_threshold=85), mirrored here for consistent labeling.
+This agent does not itself deny or escalate anything - it produces
+risk_score for the FSM's existing thresholds (escalation at 40,
+hard denial at 85, both defined in fsm/transitions.py) to act on.
 """
 
 from agents.base_agent import BaseAgent, AgentResult
+from core.request_history_tracker import RequestHistoryTracker
 
-# Factor weights - stable from today, per the original design.
 FACTOR_WEIGHTS = {
     "repeated_failures": 10,
     "unusual_hour": 20,
@@ -43,45 +36,30 @@ FACTOR_WEIGHTS = {
     "classification_jump": 30,
 }
 
-MAX_POSSIBLE_SCORE = sum(FACTOR_WEIGHTS.values())
+MAX_POSSIBLE_RISK_WEIGHT = sum(FACTOR_WEIGHTS.values())  # 112
 
-# Mirrors core.config.settings thresholds - kept as local constants
-# here since this agent shouldn't depend on config wiring not yet
-# connected to the FSM itself (see Day 21 notes).
-RISK_LEVEL_LOW_MAX = 39
-RISK_LEVEL_MEDIUM_MAX = 84
-
-# A clearance gap this large or more counts as a "classification jump" -
-# attempting to access a resource far above one's own clearance level,
-# not just modestly insufficient.
 CLASSIFICATION_JUMP_THRESHOLD = 2
 
 
-def classify_risk_level(risk_score: int) -> str:
-    if risk_score <= RISK_LEVEL_LOW_MAX:
-        return "LOW"
-    if risk_score <= RISK_LEVEL_MEDIUM_MAX:
-        return "MEDIUM"
-    return "HIGH"
-
-
-class SecurityRiskIntelligenceAgent(BaseAgent):
+class SecurityRiskAgent(BaseAgent):
     """
-    Computes a weighted risk score from behavioral/contextual factors.
-    Takes the combined output of RequestUnderstandingAgent and
-    AccessValidationAgent as input. Does not itself deny or escalate
-    anything - produces risk_score for the FSM to act on, exactly as
-    designed since Day 3's transition rulebook was written to expect
-    a risk_score field.
+    Computes risk_score from available request data plus injected
+    request history. geographic_anomaly is reserved in FACTOR_WEIGHTS
+    but not yet triggered as of Day 37.
     """
+
+    def __init__(self, history_tracker: RequestHistoryTracker = None):
+        super().__init__()
+        self._history = history_tracker or RequestHistoryTracker()
 
     @property
     def agent_name(self) -> str:
-        return "security_risk_intelligence"
+        return "security_risk"
 
     def process(self, input_data: dict) -> AgentResult:
         clearance = input_data.get("clearance")
         required_clearance = input_data.get("required_clearance")
+        user_id = input_data.get("user_id")
 
         if clearance is None or required_clearance is None:
             return self._failure(
@@ -89,39 +67,40 @@ class SecurityRiskIntelligenceAgent(BaseAgent):
                 errors=["clearance and required_clearance are required"],
             )
 
-        factors_present = {
-            "department_mismatch": bool(input_data.get("cross_department_request", False)),
-            "unusual_hour": bool(input_data.get("after_hours_access", False)),
-            "classification_jump": (required_clearance - clearance) >= CLASSIFICATION_JUMP_THRESHOLD,
+        triggered = {}
 
-            # Not yet implemented - see module docstring for the day
-            # each will be built. Always False until then.
-            "repeated_failures": False,
-            "rapid_succession": False,
-            "geographic_anomaly": False,
-        }
+        shortfall = required_clearance - clearance
+        if shortfall >= CLASSIFICATION_JUMP_THRESHOLD:
+            triggered["classification_jump"] = FACTOR_WEIGHTS["classification_jump"]
 
-        triggered_weight = sum(
-            weight for factor, weight in FACTOR_WEIGHTS.items()
-            if factors_present[factor]
-        )
-        risk_score = round((triggered_weight / MAX_POSSIBLE_SCORE) * 100)
-        risk_level = classify_risk_level(risk_score)
+        if input_data.get("cross_department_request") is True:
+            triggered["department_mismatch"] = FACTOR_WEIGHTS["department_mismatch"]
 
-        triggered_factors = [f for f, present in factors_present.items() if present]
+        if input_data.get("after_hours_access") is True:
+            triggered["unusual_hour"] = FACTOR_WEIGHTS["unusual_hour"]
+
+        if user_id:
+            if self._history.has_repeated_failures(user_id):
+                triggered["repeated_failures"] = FACTOR_WEIGHTS["repeated_failures"]
+            if self._history.has_rapid_succession(user_id):
+                triggered["rapid_succession"] = FACTOR_WEIGHTS["rapid_succession"]
+
+        raw_score = sum(triggered.values())
+        risk_score = round((raw_score / MAX_POSSIBLE_RISK_WEIGHT) * 100)
+        triggered_names = list(triggered.keys())
+
+        if triggered_names:
+            reasoning = (
+                f"Risk score {risk_score} from triggered factors: "
+                f"{', '.join(triggered_names)} "
+                f"(raw weight {raw_score}/{MAX_POSSIBLE_RISK_WEIGHT})"
+            )
+        else:
+            reasoning = f"No risk factors triggered - risk score {risk_score}"
 
         data = {
             "risk_score": risk_score,
-            "risk_level": risk_level,
-            "triggered_factors": triggered_factors,
+            "risk_triggers": triggered_names,
         }
-
-        if triggered_factors:
-            reasoning = (
-                f"Risk score {risk_score} ({risk_level}) - triggered factors: "
-                f"{', '.join(triggered_factors)}"
-            )
-        else:
-            reasoning = f"Risk score {risk_score} ({risk_level}) - no risk factors triggered"
 
         return self._success(data, reasoning)
