@@ -312,3 +312,122 @@ class TestSecurityRiskAgentIncludesLevelAndRecommendation:
                 assert recommendation == "HARD_DENY", f"Mismatch at score={score}"
             elif fsm_escalates:
                 assert recommendation == "ESCALATE", f"Mismatch at score={score}"
+
+class TestSecurityRiskAgentClearanceExcessAndExtremes:
+
+    def test_clearance_exceeding_required_does_not_trigger_classification_jump(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({"clearance": 5, "required_clearance": 1})
+
+        assert "classification_jump" not in result.data["risk_triggers"]
+        assert result.data["risk_score"] == 0
+
+    def test_clearance_far_exceeding_required_still_zero_risk(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({"clearance": 10, "required_clearance": 0})
+
+        assert result.data["risk_score"] == 0
+        assert result.data["risk_level"] == "LOW"
+
+    def test_extreme_shortfall_does_not_break_formula(self):
+        """
+        An unrealistic but not-impossible-to-receive input (e.g. a
+        malformed upstream request) - confirms the formula stays
+        sane (no negative score, no crash, capped behavior identical
+        to a normal classification_jump) rather than doing something
+        undefined with an extreme shortfall.
+        """
+        agent = SecurityRiskAgent()
+        result = agent.process({"clearance": 0, "required_clearance": 100})
+
+        assert result.data["risk_score"] >= 0
+        assert result.data["risk_score"] <= 100
+        assert "classification_jump" in result.data["risk_triggers"]
+
+
+class TestSecurityRiskAgentTriggerOrderIsDeterministic:
+
+    def test_trigger_order_matches_factor_weights_definition_order(self):
+        """
+        Locks in that risk_triggers always lists factors in the same
+        order (matching FACTOR_WEIGHTS' iteration order in the
+        agent's process() method), regardless of which subset
+        triggers - the Explainability Center will display this list
+        as-is, so consistent ordering matters for a stable UI.
+        """
+        tracker = RequestHistoryTracker(failure_threshold=3, rapid_threshold=5)
+        for _ in range(3):
+            tracker.record_request("user-009", was_denied=True)
+        for _ in range(5):
+            tracker.record_request("user-009", was_denied=False)
+
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-009", "US")
+
+        agent = SecurityRiskAgent(history_tracker=tracker, geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-009",
+            "clearance": 0, "required_clearance": 5,
+            "cross_department_request": True,
+            "after_hours_access": True,
+            "location": "RU",
+        })
+
+        expected_order = [
+            "classification_jump", "department_mismatch", "unusual_hour",
+            "repeated_failures", "rapid_succession", "geographic_anomaly",
+        ]
+        assert result.data["risk_triggers"] == expected_order
+
+    def test_partial_trigger_subset_preserves_relative_order(self):
+        """
+        With only some factors triggered (not all 6), the ones that
+        DO trigger should still appear in the same relative order as
+        the full-trigger case above.
+        """
+        agent = SecurityRiskAgent()
+        result = agent.process({
+            "clearance": 0, "required_clearance": 5,  # classification_jump
+            "after_hours_access": True,                 # unusual_hour
+            # department_mismatch NOT triggered
+        })
+
+        assert result.data["risk_triggers"] == ["classification_jump", "unusual_hour"]
+
+
+class TestSecurityRiskAgentMixedStatefulFactors:
+
+    def test_history_triggers_but_geo_does_not(self):
+        tracker = RequestHistoryTracker(failure_threshold=3)
+        for _ in range(3):
+            tracker.record_request("user-009", was_denied=True)
+
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-009", "US")
+
+        agent = SecurityRiskAgent(history_tracker=tracker, geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-009", "clearance": 5, "required_clearance": 2,
+            "location": "US",  # matches known history - not anomalous
+        })
+
+        assert "repeated_failures" in result.data["risk_triggers"]
+        assert "geographic_anomaly" not in result.data["risk_triggers"]
+
+    def test_geo_triggers_but_history_does_not(self):
+        tracker = RequestHistoryTracker(failure_threshold=3)
+        tracker.record_request("user-009", was_denied=False)  # not enough for a trigger
+
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-009", "US")
+
+        agent = SecurityRiskAgent(history_tracker=tracker, geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-009", "clearance": 5, "required_clearance": 2,
+            "location": "RU",  # anomalous vs known "US"
+        })
+
+        assert "geographic_anomaly" in result.data["risk_triggers"]
+        assert "repeated_failures" not in result.data["risk_triggers"]
+        assert "rapid_succession" not in result.data["risk_triggers"]
+
