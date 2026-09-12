@@ -216,3 +216,128 @@ class TestEscalationAgentFullChainWithNotification:
         notification = escalation_result.data["notification"]
         assert notification.approver_user_id == "user-007"  # CISO
         assert notification.requester_user_id == "user-008"
+
+class TestEscalationAgentResolveDecisionHumanApproval:
+
+    def test_approved_decision_sets_correct_flags(self):
+        agent = EscalationAgent()
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-1"})
+
+        result = agent.resolve_decision("req-1", human_decision="approved")
+
+        assert result.data == {
+            "approval_token_valid": True, "rejected": False, "timed_out": False,
+        }
+
+    def test_rejected_decision_sets_correct_flags(self):
+        agent = EscalationAgent()
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-2"})
+
+        result = agent.resolve_decision("req-2", human_decision="rejected")
+
+        assert result.data == {
+            "approval_token_valid": False, "rejected": True, "timed_out": False,
+        }
+
+    def test_invalid_decision_string_fails_gracefully(self):
+        agent = EscalationAgent()
+        result = agent.resolve_decision("req-3", human_decision="maybe")
+
+        assert result.success is False
+
+
+class TestEscalationAgentResolveDecisionTimeout:
+
+    def test_not_yet_timed_out_when_within_window(self):
+        from datetime import datetime, timezone
+        from core.timeout_tracker import EscalationTimeoutTracker
+
+        clock_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=lambda: clock_time)
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-4"})
+
+        result = agent.resolve_decision("req-4")
+
+        assert result.data == {
+            "approval_token_valid": False, "rejected": False, "timed_out": False,
+        }
+
+    def test_timed_out_after_window_elapses(self):
+        from datetime import datetime, timezone, timedelta
+        from core.timeout_tracker import EscalationTimeoutTracker
+
+        state = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=lambda: state["now"])
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-5"})
+
+        state["now"] += timedelta(seconds=1801)
+        result = agent.resolve_decision("req-5")
+
+        assert result.data == {
+            "approval_token_valid": False, "rejected": False, "timed_out": True,
+        }
+
+    def test_resolving_unknown_request_id_fails_gracefully(self):
+        agent = EscalationAgent()
+        result = agent.resolve_decision("never-escalated")
+
+        assert result.success is False
+
+
+class TestEscalationAgentResolveDecisionFeedsFsm:
+
+    def test_approved_decision_feeds_fsm_to_access_granted(self):
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+
+        agent = EscalationAgent()
+        agent.process({"user_id": "user-001", "required_clearance": 3, "request_id": "req-fsm-1"})
+        decision_result = agent.resolve_decision("req-fsm-1", human_decision="approved")
+
+        context = {
+            "ambiguity_flag": False, "clearance": 1, "required_clearance": 3,
+            "risk_score": 10, "escalation_sent": True,
+        }
+        context.update(decision_result.data)
+
+        fsm = GovernanceFSM(request_id="req-fsm-1")
+        fsm.transition(context)  # -> REQUEST_RECEIVED
+        fsm.transition(context)  # -> PARSING_REQUEST
+        fsm.transition(context)  # -> VALIDATING_ACCESS
+        fsm.transition(context)  # -> ESCALATION_REQUIRED
+        fsm.transition(context)  # -> MANAGER_REVIEW
+        final_state = fsm.transition(context)  # -> should be ACCESS_GRANTED
+
+        assert final_state == RequestState.ACCESS_GRANTED
+
+    def test_timed_out_decision_feeds_fsm_to_denied_final(self):
+        from datetime import datetime, timezone, timedelta
+        from core.timeout_tracker import EscalationTimeoutTracker
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+
+        state = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=lambda: state["now"])
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({"user_id": "user-001", "required_clearance": 3, "request_id": "req-fsm-2"})
+
+        state["now"] += timedelta(seconds=1801)
+        decision_result = agent.resolve_decision("req-fsm-2")
+
+        context = {
+            "ambiguity_flag": False, "clearance": 1, "required_clearance": 3,
+            "risk_score": 10, "escalation_sent": True,
+        }
+        context.update(decision_result.data)
+
+        fsm = GovernanceFSM(request_id="req-fsm-2")
+        fsm.transition(context)
+        fsm.transition(context)
+        fsm.transition(context)
+        fsm.transition(context)
+        fsm.transition(context)  # -> MANAGER_REVIEW
+        final_state = fsm.transition(context)  # -> should be DENIED_FINAL
+
+        assert final_state == RequestState.DENIED_FINAL

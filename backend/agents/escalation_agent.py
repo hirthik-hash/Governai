@@ -3,44 +3,43 @@
 """
 Escalation Agent (GovernAI Agent 4 of 7).
 
-Routes an access request that needs human approval to the correct
-approver (Day 43: walks the reports_to chain from seed_data.py),
-then records the escalation and starts its approval timeout clock
-(Day 44: via an injected EscalationTimeoutTracker, built Day 14 and
-unused until now).
+Two distinct responsibilities, at two distinct points in time:
 
-This agent produces a NOTIFICATION RECORD, not a real sent
-notification - there is no email/Slack infrastructure yet (that
-would be Phase 3+). The notification record is structured and
-loggable, which is the honest scope for what exists today; wiring
-it to a real channel later is a change to how the record gets
-delivered, not to this agent's routing/timeout logic.
+  1. process() (Days 43-44): given a newly-escalated request, find
+     the correct approver (walking the reports_to chain) and record
+     the escalation, starting its timeout clock via an injected
+     EscalationTimeoutTracker. Produces a NotificationRecord.
 
-Approval/rejection/timeout OUTCOME HANDLING (turning a timeout or a
-human decision into FSM context flags) is Days 45-46, not this file.
+  2. resolve_decision() (Day 45, this addition): given a request_id
+     that was already escalated via process(), determine the outcome
+     - either a human decision was recorded, or the timeout has
+     fired - and produce the EXACT three FSM-ready flags
+     MANAGER_REVIEW's transitions require: approval_token_valid,
+     rejected, timed_out. These are always produced as a consistent,
+     mutually-exclusive set, since the FSM's rulebook requires
+     exactly one matching condition or it raises
+     AmbiguousTransitionError.
+
+These are kept as separate methods because they happen at genuinely
+different times, likely called by different things: process() runs
+once, at escalation time. resolve_decision() runs later - either
+when a human actually responds, or when something polls for timeout
+expiry.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from agents.base_agent import BaseAgent, AgentResult
 from data.seed_data import get_user
-from core.timeout_tracker import EscalationTimeoutTracker
+from core.timeout_tracker import EscalationTimeoutTracker, UnknownEscalationError
 
 
 class NoApproverFoundError(Exception):
-    """Raised only for a genuine data integrity problem - a reports_to
-    chain that doesn't terminate (e.g. a cycle) or points to a
-    nonexistent user. Not raised for normal 'reached the top' cases."""
     pass
 
 
 @dataclass
 class NotificationRecord:
-    """
-    Structured record of an escalation notification. Not a real sent
-    message - Phase 3+ would deliver this via a real channel. This is
-    the honest, loggable shape of what such a delivery would contain.
-    """
     request_id: str
     approver_user_id: str
     approver_name: str
@@ -53,13 +52,12 @@ class NotificationRecord:
 
 class EscalationAgent(BaseAgent):
     """
-    Determines the correct approver for an escalated request, then
-    records the escalation (starting its timeout clock via an
-    injected EscalationTimeoutTracker) and produces a structured
-    notification record.
+    Determines the correct approver for an escalated request, records
+    it (starting the timeout clock), and later resolves the outcome
+    into the exact flags GovernanceFSM's MANAGER_REVIEW state expects.
     """
 
-    MAX_CHAIN_DEPTH = 10  # safety limit against cyclic reports_to data
+    MAX_CHAIN_DEPTH = 10
 
     def __init__(self, timeout_tracker: EscalationTimeoutTracker = None):
         super().__init__()
@@ -96,7 +94,6 @@ class EscalationAgent(BaseAgent):
 
         chain_reached_top = approver.reports_to == ""
 
-        # Record the escalation - this starts the timeout clock.
         self._timeout_tracker.record_escalation_sent(request_id)
 
         notification = NotificationRecord(
@@ -129,6 +126,58 @@ class EscalationAgent(BaseAgent):
             reasoning += " - reached top of chain"
 
         return self._success(data, reasoning)
+
+    def resolve_decision(self, request_id: str, human_decision: str = None) -> AgentResult:
+        """
+        Determines the outcome for a request already escalated via
+        process(). human_decision, if given, must be "approved" or
+        "rejected" - a real human response. If human_decision is
+        None, checks the timeout tracker instead.
+
+        Always returns exactly one of the three outcomes as True,
+        the other two False - never an ambiguous combination, since
+        GovernanceFSM's rulebook requires exactly one matching
+        transition condition.
+        """
+        VALID_DECISIONS = {"approved", "rejected"}
+
+        if human_decision is not None and human_decision not in VALID_DECISIONS:
+            return self._failure(
+                f"Invalid human_decision: {human_decision}",
+                errors=[f"human_decision must be one of {sorted(VALID_DECISIONS)} or None"],
+            )
+
+        if human_decision == "approved":
+            return self._success(
+                {"approval_token_valid": True, "rejected": False, "timed_out": False},
+                f"Request {request_id} approved by human decision",
+            )
+
+        if human_decision == "rejected":
+            return self._success(
+                {"approval_token_valid": False, "rejected": True, "timed_out": False},
+                f"Request {request_id} rejected by human decision",
+            )
+
+        # No human decision yet - check the timeout tracker.
+        try:
+            is_timed_out = self._timeout_tracker.is_timed_out(request_id)
+        except UnknownEscalationError:
+            return self._failure(
+                f"No escalation on record for request {request_id}",
+                errors=[f"resolve_decision called for {request_id} before process() escalated it"],
+            )
+
+        if is_timed_out:
+            return self._success(
+                {"approval_token_valid": False, "rejected": False, "timed_out": True},
+                f"Request {request_id} timed out awaiting approval",
+            )
+
+        return self._success(
+            {"approval_token_valid": False, "rejected": False, "timed_out": False},
+            f"Request {request_id} still awaiting approval, not yet timed out",
+        )
 
     def _find_approver(self, requester, required_clearance: int):
         current = requester
