@@ -1,6 +1,9 @@
 # backend/tests/test_escalation_agent.py
 
 from agents.escalation_agent import EscalationAgent
+from datetime import datetime, timezone, timedelta
+from core.timeout_tracker import EscalationTimeoutTracker
+from agents.escalation_agent import NotificationRecord
 
 
 class TestEscalationAgentBasicRouting:
@@ -97,3 +100,119 @@ class TestEscalationAgentIntegratesWithPriorAgents:
 
         assert escalation_result.success is True
         assert escalation_result.data["approver_user_id"] == "user-007"
+
+
+class FakeClock:
+    def __init__(self, start: datetime):
+        self.current = start
+
+    def now(self) -> datetime:
+        return self.current
+
+    def advance(self, seconds: int) -> None:
+        self.current += timedelta(seconds=seconds)
+
+
+class TestEscalationAgentNotificationRecord:
+
+    def test_successful_escalation_includes_notification(self):
+        agent = EscalationAgent()
+        result = agent.process({
+            "user_id": "user-001", "required_clearance": 2,
+            "request_id": "req-abc", "resolved_resource_id": "resource-002",
+        })
+
+        assert "notification" in result.data
+        notification = result.data["notification"]
+        assert isinstance(notification, NotificationRecord)
+        assert notification.request_id == "req-abc"
+        assert notification.approver_user_id == "user-002"
+        assert notification.requester_user_id == "user-001"
+        assert notification.resource_summary == "resource-002"
+
+    def test_notification_includes_timeout_seconds(self):
+        agent = EscalationAgent()
+        result = agent.process({"user_id": "user-001", "required_clearance": 2})
+
+        assert result.data["notification"].timeout_seconds == 1800  # default
+
+    def test_missing_request_id_defaults_gracefully(self):
+        agent = EscalationAgent()
+        result = agent.process({"user_id": "user-001", "required_clearance": 2})
+
+        assert result.data["notification"].request_id == "unknown-request"
+
+    def test_escalation_sent_flag_is_true_on_success(self):
+        agent = EscalationAgent()
+        result = agent.process({"user_id": "user-001", "required_clearance": 2})
+
+        assert result.data["escalation_sent"] is True
+
+
+class TestEscalationAgentTimeoutTrackerIntegration:
+
+    def test_uses_injected_tracker_with_custom_timeout(self):
+        clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=60, now_fn=clock.now)
+
+        agent = EscalationAgent(timeout_tracker=tracker)
+        result = agent.process({
+            "user_id": "user-001", "required_clearance": 2, "request_id": "req-fast",
+        })
+
+        assert result.data["notification"].timeout_seconds == 60
+
+    def test_escalation_actually_starts_the_timeout_clock(self):
+        """
+        Confirms process() genuinely calls record_escalation_sent()
+        on the tracker, not just constructs a notification with a
+        timeout number - the tracker itself should now know about
+        this request and correctly report timeout status over time.
+        """
+        clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=clock.now)
+
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({
+            "user_id": "user-001", "required_clearance": 2, "request_id": "req-clock-test",
+        })
+
+        assert tracker.is_timed_out("req-clock-test") is False
+
+        clock.advance(1801)
+        assert tracker.is_timed_out("req-clock-test") is True
+
+    def test_two_different_requests_tracked_independently(self):
+        clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=clock.now)
+        agent = EscalationAgent(timeout_tracker=tracker)
+
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-A"})
+        clock.advance(900)
+        agent.process({"user_id": "user-003", "required_clearance": 3, "request_id": "req-B"})
+        clock.advance(901)  # req-A now at 1801s, req-B at 901s
+
+        assert tracker.is_timed_out("req-A") is True
+        assert tracker.is_timed_out("req-B") is False
+
+
+class TestEscalationAgentFullChainWithNotification:
+
+    def test_full_chain_produces_notification_for_realistic_scenario(self):
+        from agents.request_agent import RequestUnderstandingAgent
+
+        request_agent = RequestUnderstandingAgent()
+        request_result = request_agent.process({
+            "user_id": "user-008", "resource_id": "resource-005",
+        })
+
+        escalation_agent = EscalationAgent()
+        combined = dict(request_result.data)
+        combined["user_id"] = "user-008"
+        combined["request_id"] = "req-full-chain-001"
+        escalation_result = escalation_agent.process(combined)
+
+        assert escalation_result.success is True
+        notification = escalation_result.data["notification"]
+        assert notification.approver_user_id == "user-007"  # CISO
+        assert notification.requester_user_id == "user-008"

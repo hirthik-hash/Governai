@@ -4,25 +4,27 @@
 Escalation Agent (GovernAI Agent 4 of 7).
 
 Routes an access request that needs human approval to the correct
-approver, per the roadmap's fixed hierarchy:
+approver (Day 43: walks the reports_to chain from seed_data.py),
+then records the escalation and starts its approval timeout clock
+(Day 44: via an injected EscalationTimeoutTracker, built Day 14 and
+unused until now).
 
-  Employee -> TeamLead (clearance 1->2)
-  TeamLead -> Manager (clearance 2->3)
-  Manager -> Director (clearance 3->4)
-  Director -> CISO (clearance 4->5, top-secret)
+This agent produces a NOTIFICATION RECORD, not a real sent
+notification - there is no email/Slack infrastructure yet (that
+would be Phase 3+). The notification record is structured and
+loggable, which is the honest scope for what exists today; wiring
+it to a real channel later is a change to how the record gets
+delivered, not to this agent's routing/timeout logic.
 
-Today's piece (Day 43) is routing only: given a requester's user_id,
-find the correct approver by walking the reports_to chain (added to
-seed_data.py this same day) until reaching someone with sufficient
-clearance to approve the resource, or the top of the chain (CISO).
-
-Notification generation, approval timeout wiring, and
-approval/rejection/timeout handling are NOT part of this file yet -
-those are Days 44-48.
+Approval/rejection/timeout OUTCOME HANDLING (turning a timeout or a
+human decision into FSM context flags) is Days 45-46, not this file.
 """
 
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from agents.base_agent import BaseAgent, AgentResult
 from data.seed_data import get_user
+from core.timeout_tracker import EscalationTimeoutTracker
 
 
 class NoApproverFoundError(Exception):
@@ -32,15 +34,36 @@ class NoApproverFoundError(Exception):
     pass
 
 
+@dataclass
+class NotificationRecord:
+    """
+    Structured record of an escalation notification. Not a real sent
+    message - Phase 3+ would deliver this via a real channel. This is
+    the honest, loggable shape of what such a delivery would contain.
+    """
+    request_id: str
+    approver_user_id: str
+    approver_name: str
+    requester_user_id: str
+    requester_name: str
+    resource_summary: str
+    sent_at: str
+    timeout_seconds: int
+
+
 class EscalationAgent(BaseAgent):
     """
-    Determines the correct approver for an escalated request by
-    walking the requester's reports_to chain until finding someone
-    with clearance >= required_clearance, or reaching the top
-    (a user with no reports_to, i.e. the CISO).
+    Determines the correct approver for an escalated request, then
+    records the escalation (starting its timeout clock via an
+    injected EscalationTimeoutTracker) and produces a structured
+    notification record.
     """
 
     MAX_CHAIN_DEPTH = 10  # safety limit against cyclic reports_to data
+
+    def __init__(self, timeout_tracker: EscalationTimeoutTracker = None):
+        super().__init__()
+        self._timeout_tracker = timeout_tracker or EscalationTimeoutTracker()
 
     @property
     def agent_name(self) -> str:
@@ -49,6 +72,8 @@ class EscalationAgent(BaseAgent):
     def process(self, input_data: dict) -> AgentResult:
         user_id = input_data.get("user_id")
         required_clearance = input_data.get("required_clearance")
+        request_id = input_data.get("request_id", "unknown-request")
+        resource_summary = input_data.get("resolved_resource_id", "unspecified resource")
 
         if not user_id or required_clearance is None:
             return self._failure(
@@ -71,17 +96,34 @@ class EscalationAgent(BaseAgent):
 
         chain_reached_top = approver.reports_to == ""
 
+        # Record the escalation - this starts the timeout clock.
+        self._timeout_tracker.record_escalation_sent(request_id)
+
+        notification = NotificationRecord(
+            request_id=request_id,
+            approver_user_id=approver.id,
+            approver_name=approver.name,
+            requester_user_id=requester.id,
+            requester_name=requester.name,
+            resource_summary=resource_summary,
+            sent_at=datetime.now(timezone.utc).isoformat(),
+            timeout_seconds=self._timeout_tracker.default_timeout_seconds,
+        )
+
         data = {
             "approver_user_id": approver.id,
             "approver_name": approver.name,
             "approver_role": approver.role,
             "approver_clearance": approver.clearance_level,
             "escalation_reached_top_of_chain": chain_reached_top,
+            "escalation_sent": True,
+            "notification": notification,
         }
 
         reasoning = (
             f"Escalation for {requester.name}'s request routed to "
-            f"{approver.name} ({approver.role}, clearance {approver.clearance_level})"
+            f"{approver.name} ({approver.role}) - notification sent, "
+            f"timeout window {notification.timeout_seconds}s"
         )
         if chain_reached_top:
             reasoning += " - reached top of chain"
@@ -89,23 +131,11 @@ class EscalationAgent(BaseAgent):
         return self._success(data, reasoning)
 
     def _find_approver(self, requester, required_clearance: int):
-        """
-        Walks the reports_to chain starting from requester's own
-        manager (not the requester themselves - you can't approve
-        your own request), stopping at the first person with
-        sufficient clearance, or at the top of the chain if nobody
-        in the chain has enough (the CISO is the ultimate approver
-        regardless of their clearance relative to required_clearance,
-        since there's nowhere higher to escalate to).
-        """
         current = requester
         depth = 0
 
         while True:
             if not current.reports_to:
-                # Reached the top of the chain (e.g. the CISO) with
-                # no higher clearance available - they're the final
-                # approver by default, whatever their own clearance is.
                 return current
 
             depth += 1
@@ -119,8 +149,7 @@ class EscalationAgent(BaseAgent):
                 current = get_user(current.reports_to)
             except ValueError:
                 raise NoApproverFoundError(
-                    f"{current.id if hasattr(current, 'id') else 'unknown'}'s "
-                    f"reports_to points to nonexistent user"
+                    f"{current.id}'s reports_to points to nonexistent user"
                 )
 
             if current.clearance_level >= required_clearance:
