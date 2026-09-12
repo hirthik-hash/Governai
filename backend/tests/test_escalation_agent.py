@@ -341,3 +341,105 @@ class TestEscalationAgentResolveDecisionFeedsFsm:
         final_state = fsm.transition(context)  # -> should be DENIED_FINAL
 
         assert final_state == RequestState.DENIED_FINAL
+
+class TestEscalationAgentBlacklistedUserRoutesNormally:
+
+    def test_blacklisted_user_still_routes_to_correct_approver(self):
+        """
+        EscalationAgent itself does not check blacklist_match - that's
+        the FSM's job (hard-denial happens before ESCALATION_REQUIRED
+        is ever reached for a blacklisted user). This test confirms
+        the agent doesn't do anything special or broken if it's ever
+        called for a blacklisted user's data anyway - it just routes
+        normally, since blacklist enforcement lives elsewhere.
+        """
+        # user-009 is the seed data's blacklisted user, reports_to user-010
+        agent = EscalationAgent()
+        result = agent.process({"user_id": "user-009", "required_clearance": 4})
+
+        assert result.success is True
+        assert result.data["approver_user_id"] == "user-010"
+
+
+class TestEscalationAgentSelfApprovalEdgeCase:
+
+    def test_ciso_requesting_their_own_escalation_returns_self(self):
+        """
+        The CISO (user-007) has reports_to="" - the top of every
+        chain. If the CISO themselves needs escalation (e.g. for a
+        resource requiring clearance higher than their own 5), they
+        are immediately their own approver by the current logic,
+        since _find_approver starts from requester.reports_to, not
+        the requester's own clearance. Documenting this explicitly:
+        it's a real edge case, not a crash, and it's the correct
+        behavior given there's nobody higher than the CISO.
+        """
+        agent = EscalationAgent()
+        result = agent.process({"user_id": "user-007", "required_clearance": 99})
+
+        assert result.success is True
+        assert result.data["approver_user_id"] == "user-007"
+        assert result.data["escalation_reached_top_of_chain"] is True
+
+
+class TestEscalationAgentResolveDecisionCalledTwice:
+
+    def test_resolving_same_request_twice_after_timeout_stays_timed_out(self):
+        """
+        Locks in current behavior: calling resolve_decision() again
+        for an already-timed-out request (with no new human_decision)
+        should consistently report timed_out=True both times - the
+        tracker's timeout state doesn't change once crossed, so
+        repeated polling gives a stable answer.
+        """
+        from datetime import datetime, timezone, timedelta
+        from core.timeout_tracker import EscalationTimeoutTracker
+
+        state = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=lambda: state["now"])
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-double"})
+
+        state["now"] += timedelta(seconds=1801)
+        first_result = agent.resolve_decision("req-double")
+        second_result = agent.resolve_decision("req-double")
+
+        assert first_result.data == second_result.data
+        assert first_result.data["timed_out"] is True
+
+    def test_human_decision_after_timeout_still_honors_the_human_decision(self):
+        """
+        Documents current behavior explicitly: if a human decision
+        arrives (human_decision="approved") even after the tracker
+        would report timed_out=True, resolve_decision() honors the
+        explicit human decision - it never even checks the tracker
+        when human_decision is provided. Whether this is the
+        DESIRED real-world policy (late approvals after timeout) is
+        a product decision for later; today we just confirm this is
+        what the code actually does, so it's a deliberate choice to
+        revisit, not a silent surprise.
+        """
+        from datetime import datetime, timezone, timedelta
+        from core.timeout_tracker import EscalationTimeoutTracker
+
+        state = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        tracker = EscalationTimeoutTracker(default_timeout_seconds=1800, now_fn=lambda: state["now"])
+        agent = EscalationAgent(timeout_tracker=tracker)
+        agent.process({"user_id": "user-001", "required_clearance": 2, "request_id": "req-late"})
+
+        state["now"] += timedelta(seconds=1801)  # now timed out
+        result = agent.resolve_decision("req-late", human_decision="approved")
+
+        assert result.data["approval_token_valid"] is True
+        assert result.data["timed_out"] is False
+
+
+class TestEscalationAgentConcurrentRequestsWithSharedTracker:
+
+    def test_two_requests_processed_and_resolved_independently(self):
+        """
+        Combines process() + resolve_decision() across two different
+        requests sharing one tracker instance - closer to how a real
+        orchestrator would use this agent for multiple simultaneous
+        escalations.
+        """
