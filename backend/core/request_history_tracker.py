@@ -8,6 +8,9 @@ patterns, which cannot be computed from a single request's data alone.
 Same clock-injection pattern as core.timeout_tracker.EscalationTimeoutTracker
 (Day 14) - a now_fn is injected so tests can control time precisely
 instead of sleeping for real.
+
+Consumed by agents.security_agent.SecurityRiskAgent as an injected
+dependency (repeated_failures and rapid_succession factors).
 """
 
 from datetime import datetime, timezone, timedelta

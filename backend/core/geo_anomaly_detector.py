@@ -12,6 +12,9 @@ a real detection.
 
 In-memory only, same as RequestHistoryTracker (Day 37) - Phase 3
 will back this with real persistence.
+
+Consumed by agents.security_agent.SecurityRiskAgent as an injected
+dependency (geographic_anomaly factor).
 """
 
 

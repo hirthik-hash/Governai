@@ -6,32 +6,51 @@ Security & Risk Intelligence Agent (GovernAI Agent 3 of 7).
 Computes a weighted risk score from behavioral risk factors, per the
 formula: risk_score = sum(triggered factor weights) / max_possible * 100.
 
-All 6 factors are implemented (Days 36-38):
-  - Stateless (Day 36): classification_jump, department_mismatch,
-    unusual_hour - computable from a single request's data.
-  - Stateful (Day 37): repeated_failures, rapid_succession - read
-    from an injected RequestHistoryTracker.
-  - Stateful (Day 38): geographic_anomaly - read from an injected
-    GeoAnomalyDetector.
+All 6 factors are implemented, in this fixed check order (also the
+guaranteed order they appear in risk_triggers, per Day 40):
+
+  1. classification_jump (weight 30) - stateless. Clearance shortfall
+     of >= 2 levels. Excess clearance (negative shortfall) never
+     triggers this, regardless of magnitude.
+  2. department_mismatch (weight 15) - stateless. Reuses
+     RequestUnderstandingAgent's cross_department_request flag.
+  3. unusual_hour (weight 20) - stateless. Reuses
+     AccessValidationAgent's after_hours_access flag.
+  4. repeated_failures (weight 10) - stateful. Read from an injected
+     RequestHistoryTracker (default: 3+ denials in 10 minutes).
+  5. rapid_succession (weight 12) - stateful. Same tracker (default:
+     5+ requests in 30 seconds).
+  6. geographic_anomaly (weight 25) - stateful. Read from an injected
+     GeoAnomalyDetector. A user's first-ever request is never
+     anomalous - there's no baseline yet to compare against.
 
 max_possible = sum of all 6 weights = 112, fixed since Day 36 so the
 score's scale never shifted as factors were added incrementally.
+Maxing out all 6 factors yields risk_score = 100 (confirmed Day 38);
+5 factors alone tops out at ~78, below the hard-denial threshold -
+geographic_anomaly is genuinely necessary to reach CRITICAL via
+behavioral factors alone (Day 37/38 finding).
 
-Day 39 adds risk_level and recommendation, both derived from
-risk_score using the SAME thresholds the FSM itself uses
-(escalation_risk_threshold=40, hard_denial_risk_threshold=85, from
-core.config.settings) - so this agent's description of risk can
-never contradict what the FSM will actually do with that score.
-These thresholds are NOT re-hardcoded here; they're imported from
-the one place Day 21 defined them.
+risk_level and recommendation (Day 39) are derived from risk_score
+using thresholds imported from core.config.settings
+(escalation_risk_threshold=40, hard_denial_risk_threshold=85) - the
+SAME values fsm/transitions.py uses independently, so this agent's
+description of risk can never contradict what the FSM actually does
+with the same score (verified directly against fsm.transitions in
+tests/test_security_agent.py).
 
 This agent does not itself deny or escalate anything - it produces
-risk_score for the FSM's existing thresholds (defined independently
-in fsm/transitions.py) to act on. risk_level/recommendation are
-purely descriptive/explanatory output for humans and the future
-Explainability Center, not inputs the FSM consumes.
-"""
+risk_score for the FSM's existing thresholds to act on. It never
+raises for expected input issues (missing clearance fields, missing
+user_id/location) - those degrade gracefully to skipped checks or a
+_failure() result, never an exception.
 
+Full three-agent chain integration (RequestUnderstandingAgent ->
+AccessValidationAgent -> SecurityRiskAgent -> GovernanceFSM), covering
+every FSM outcome including risk-score-driven hard denial without
+relying on blacklist_match, is in
+tests/test_security_agent_fsm_integration.py (Day 41).
+"""
 from agents.base_agent import BaseAgent, AgentResult
 from core.request_history_tracker import RequestHistoryTracker
 from core.geo_anomaly_detector import GeoAnomalyDetector
