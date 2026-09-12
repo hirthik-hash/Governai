@@ -6,6 +6,7 @@ from agents.security_agent import (
     MAX_POSSIBLE_RISK_WEIGHT,
 )
 from core.geo_anomaly_detector import GeoAnomalyDetector
+from agents.security_agent import compute_risk_level_and_recommendation
 
 class TestSecurityRiskAgentRepeatedFailures:
 
@@ -224,3 +225,90 @@ class TestSecurityRiskAgentAllSixFactorsCombined:
         new_state = fsm.transition(context)
 
         assert new_state == RequestState.HARD_DENIED
+
+
+class TestRiskLevelAndRecommendationThresholds:
+
+    def test_zero_risk_is_low_allow(self):
+        level, rec = compute_risk_level_and_recommendation(0)
+        assert level == "LOW"
+        assert rec == "ALLOW"
+
+    def test_just_under_escalation_threshold_is_medium_monitor(self):
+        # escalation threshold is 40, half of that is 20
+        level, rec = compute_risk_level_and_recommendation(39)
+        assert level == "MEDIUM"
+        assert rec == "MONITOR"
+
+    def test_at_escalation_threshold_is_high_escalate(self):
+        level, rec = compute_risk_level_and_recommendation(40)
+        assert level == "HIGH"
+        assert rec == "ESCALATE"
+
+    def test_just_under_hard_denial_threshold_is_high_escalate(self):
+        level, rec = compute_risk_level_and_recommendation(84)
+        assert level == "HIGH"
+        assert rec == "ESCALATE"
+
+    def test_at_hard_denial_threshold_is_critical_hard_deny(self):
+        level, rec = compute_risk_level_and_recommendation(85)
+        assert level == "CRITICAL"
+        assert rec == "HARD_DENY"
+
+    def test_maximum_score_is_critical_hard_deny(self):
+        level, rec = compute_risk_level_and_recommendation(100)
+        assert level == "CRITICAL"
+        assert rec == "HARD_DENY"
+
+    def test_low_medium_boundary_at_half_escalation_threshold(self):
+        # half of 40 is 20
+        low_side_level, _ = compute_risk_level_and_recommendation(19)
+        medium_side_level, _ = compute_risk_level_and_recommendation(20)
+
+        assert low_side_level == "LOW"
+        assert medium_side_level == "MEDIUM"
+
+
+class TestSecurityRiskAgentIncludesLevelAndRecommendation:
+
+    def test_output_includes_risk_level_and_recommendation(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({"clearance": 5, "required_clearance": 2})
+
+        assert "risk_level" in result.data
+        assert "recommendation" in result.data
+        assert result.data["risk_level"] == "LOW"
+        assert result.data["recommendation"] == "ALLOW"
+
+    def test_reasoning_mentions_recommendation(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({
+            "clearance": 0, "required_clearance": 5,
+            "cross_department_request": True,
+            "after_hours_access": True,
+        })
+
+        assert "recommendation" in result.reasoning.lower()
+
+    def test_thresholds_used_by_agent_match_fsm_thresholds(self):
+        """
+        Locks in the Day 39 design goal directly: whatever risk_score
+        this agent computes, its recommendation must never contradict
+        what the FSM itself would do with that exact score. This test
+        walks the FSM's own escalation/hard-denial boundary values
+        (40 and 85, from fsm/transitions.py) through the agent's
+        recommendation function and confirms agreement.
+        """
+        from fsm.transitions import needs_escalation, is_hard_denied
+
+        for score in [0, 10, 39, 40, 41, 84, 85, 86, 100]:
+            level, recommendation = compute_risk_level_and_recommendation(score)
+
+            fsm_ctx = {"risk_score": score, "clearance": 0, "required_clearance": 0}
+            fsm_hard_denies = is_hard_denied(fsm_ctx)
+            fsm_escalates = needs_escalation(fsm_ctx)
+
+            if fsm_hard_denies:
+                assert recommendation == "HARD_DENY", f"Mismatch at score={score}"
+            elif fsm_escalates:
+                assert recommendation == "ESCALATE", f"Mismatch at score={score}"
