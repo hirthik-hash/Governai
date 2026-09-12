@@ -6,26 +6,30 @@ Security & Risk Intelligence Agent (GovernAI Agent 3 of 7).
 Computes a weighted risk score from behavioral risk factors, per the
 formula: risk_score = sum(triggered factor weights) / max_possible * 100.
 
-Six factors exist in the full design (see FACTOR_WEIGHTS):
-  - Day 36: classification_jump, department_mismatch, unusual_hour
-    (stateless - computable from a single request's data)
-  - Day 37 (this version): repeated_failures, rapid_succession
-    (stateful - read from an injected RequestHistoryTracker)
-  - Day 38 adds geographic_anomaly.
+All 6 factors are now implemented (Days 36-38):
+  - Stateless (Day 36): classification_jump, department_mismatch,
+    unusual_hour - computable from a single request's data.
+  - Stateful (Day 37): repeated_failures, rapid_succession - read
+    from an injected RequestHistoryTracker.
+  - Stateful (Day 38): geographic_anomaly - read from an injected
+    GeoAnomalyDetector. Only flagged if the user has prior location
+    history AND the new location isn't part of it; a first-ever
+    request is never anomalous.
 
-max_possible is fixed at the sum of ALL 6 weights (112) from day one,
-even before all 6 are implemented - this keeps risk_score's scale
-stable as more factors are added, rather than having every
-previously-scored request's relative risk shift when the denominator
-changes.
+max_possible = sum of all 6 weights = 112, fixed since Day 36 so the
+score's scale never shifted as factors were added incrementally.
 
 This agent does not itself deny or escalate anything - it produces
 risk_score for the FSM's existing thresholds (escalation at 40,
 hard denial at 85, both defined in fsm/transitions.py) to act on.
+Note: this agent does NOT call record_request()/record_location() -
+that's the caller's responsibility, after the FSM's decision is
+known, so history reflects actual outcomes, not just attempts.
 """
 
 from agents.base_agent import BaseAgent, AgentResult
 from core.request_history_tracker import RequestHistoryTracker
+from core.geo_anomaly_detector import GeoAnomalyDetector
 
 FACTOR_WEIGHTS = {
     "repeated_failures": 10,
@@ -43,14 +47,19 @@ CLASSIFICATION_JUMP_THRESHOLD = 2
 
 class SecurityRiskAgent(BaseAgent):
     """
-    Computes risk_score from available request data plus injected
-    request history. geographic_anomaly is reserved in FACTOR_WEIGHTS
-    but not yet triggered as of Day 37.
+    Computes risk_score from available request data plus two
+    injected history dependencies. All 6 factors are live as of
+    Day 38.
     """
 
-    def __init__(self, history_tracker: RequestHistoryTracker = None):
+    def __init__(
+        self,
+        history_tracker: RequestHistoryTracker = None,
+        geo_detector: GeoAnomalyDetector = None,
+    ):
         super().__init__()
         self._history = history_tracker or RequestHistoryTracker()
+        self._geo = geo_detector or GeoAnomalyDetector()
 
     @property
     def agent_name(self) -> str:
@@ -60,6 +69,7 @@ class SecurityRiskAgent(BaseAgent):
         clearance = input_data.get("clearance")
         required_clearance = input_data.get("required_clearance")
         user_id = input_data.get("user_id")
+        location = input_data.get("location")
 
         if clearance is None or required_clearance is None:
             return self._failure(
@@ -84,6 +94,10 @@ class SecurityRiskAgent(BaseAgent):
                 triggered["repeated_failures"] = FACTOR_WEIGHTS["repeated_failures"]
             if self._history.has_rapid_succession(user_id):
                 triggered["rapid_succession"] = FACTOR_WEIGHTS["rapid_succession"]
+
+        if user_id and location:
+            if self._geo.is_anomalous(user_id, location):
+                triggered["geographic_anomaly"] = FACTOR_WEIGHTS["geographic_anomaly"]
 
         raw_score = sum(triggered.values())
         risk_score = round((raw_score / MAX_POSSIBLE_RISK_WEIGHT) * 100)

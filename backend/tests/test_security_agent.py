@@ -5,6 +5,7 @@ from agents.security_agent import (
     FACTOR_WEIGHTS,
     MAX_POSSIBLE_RISK_WEIGHT,
 )
+from core.geo_anomaly_detector import GeoAnomalyDetector
 
 class TestSecurityRiskAgentRepeatedFailures:
 
@@ -110,3 +111,116 @@ class TestSecurityRiskAgentAllFiveFactorsCombined:
         })
 
         assert result.data["risk_score"] < 85
+
+
+class TestSecurityRiskAgentGeographicAnomaly:
+
+    def test_anomalous_location_triggers_factor(self):
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-001", "US")
+
+        agent = SecurityRiskAgent(geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-001", "clearance": 5, "required_clearance": 2,
+            "location": "RU",
+        })
+
+        assert "geographic_anomaly" in result.data["risk_triggers"]
+
+    def test_known_location_does_not_trigger(self):
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-001", "US")
+
+        agent = SecurityRiskAgent(geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-001", "clearance": 5, "required_clearance": 2,
+            "location": "US",
+        })
+
+        assert "geographic_anomaly" not in result.data["risk_triggers"]
+
+    def test_first_ever_location_does_not_trigger(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({
+            "user_id": "user-001", "clearance": 5, "required_clearance": 2,
+            "location": "US",
+        })
+
+        assert "geographic_anomaly" not in result.data["risk_triggers"]
+
+    def test_missing_location_skips_check_without_crashing(self):
+        agent = SecurityRiskAgent()
+        result = agent.process({
+            "user_id": "user-001", "clearance": 5, "required_clearance": 2,
+        })
+
+        assert result.success is True
+        assert "geographic_anomaly" not in result.data["risk_triggers"]
+
+
+class TestSecurityRiskAgentAllSixFactorsCombined:
+
+    def test_all_six_factors_reaches_hard_denial_territory(self):
+        """
+        With every factor now implemented, maxing all 6 out should
+        finally clear the FSM's hard-denial threshold of 85 - Day 37
+        showed 5 factors alone (raw 87/112 ≈ 78) could not.
+        """
+        history = RequestHistoryTracker(failure_threshold=3, rapid_threshold=5)
+        for _ in range(3):
+            history.record_request("user-009", was_denied=True)
+        for _ in range(2):
+            history.record_request("user-009", was_denied=False)
+
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-009", "US")
+
+        agent = SecurityRiskAgent(history_tracker=history, geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-009",
+            "clearance": 0, "required_clearance": 5,
+            "cross_department_request": True,
+            "after_hours_access": True,
+            "location": "RU",  # anomalous vs. known "US"
+        })
+
+        assert set(result.data["risk_triggers"]) == set(FACTOR_WEIGHTS.keys())
+        assert result.data["risk_score"] == 100
+        assert result.data["risk_score"] >= 85
+
+    def test_all_six_factors_feeds_fsm_to_hard_denial(self):
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+
+        history = RequestHistoryTracker(failure_threshold=3, rapid_threshold=5)
+        for _ in range(3):
+            history.record_request("user-009", was_denied=True)
+        for _ in range(2):
+            history.record_request("user-009", was_denied=False)
+
+        geo = GeoAnomalyDetector()
+        geo.record_location("user-009", "US")
+
+        agent = SecurityRiskAgent(history_tracker=history, geo_detector=geo)
+        result = agent.process({
+            "user_id": "user-009",
+            "clearance": 0, "required_clearance": 5,
+            "cross_department_request": True,
+            "after_hours_access": True,
+            "location": "RU",
+        })
+
+        context = {
+            "ambiguity_flag": False,
+            "clearance": 0,
+            "required_clearance": 5,
+            "risk_score": result.data["risk_score"],
+        }
+
+        fsm = GovernanceFSM(request_id="security-integration-002")
+        fsm.transition(context)
+        fsm.transition(context)
+        fsm.transition(context)
+        new_state = fsm.transition(context)
+
+        assert new_state == RequestState.HARD_DENIED
