@@ -4,26 +4,24 @@
 Audit & Compliance Agent (GovernAI Agent 5 of 7).
 
 Distinct from DecisionLogger (Day 11): DecisionLogger records WHAT
-happened mechanically (every FSM state transition, timestamped).
-This agent records WHY, holistically - it compiles one comprehensive
-AuditRecord per completed request, consolidating every agent's own
-reasoning into a single human-readable compliance trail entry.
+happened mechanically. This agent records WHY, holistically - one
+comprehensive AuditRecord per completed request.
 
-Day 49: process() compiles one AuditRecord from a completed request's
-agent results plus final FSM state.
+Day 49: process() compiles one AuditRecord.
+Day 50: export_to_json() / export_to_csv() for a list of records.
+Day 51: robustness-tested against real-world data shapes (CSV
+special characters, failed-result inclusion, full escalation chains).
+Day 52 (this addition): filter_records() and sort_records() for
+querying a collection of AuditRecords by user/decision/risk level/
+date range, and generate_summary() for aggregate compliance stats
+(total requests, decision breakdown, average risk score, escalation
+rate). generate_summary is deliberately rule-based aggregation, not
+LLM-generated - reliable, deterministic compliance numbers matter
+more here than natural-language flourish, and an LLM summary is
+honestly out of scope until Phase 4's Ollama integration exists.
 
-Day 50 (this addition): export_to_json() and export_to_csv(), both
-taking a LIST of AuditRecords (a real compliance export is almost
-always "all records for a period," not one at a time) and returning
-a string ready to write to a file or send in a response. PDF export
-and the real-time dashboard feed are NOT part of this file - PDF
-needs the pdf skill/library infrastructure (better suited once
-Phase 5 has a frontend requesting it), and the real-time feed is
-already DecisionLogger's job.
-
-Export functions are module-level, not agent methods - exporting is
-a utility operation on already-compiled records, not "processing a
-request" in the BaseAgent sense.
+PDF export remains deferred (Phase 5, when a frontend can request
+it). The real-time dashboard feed remains DecisionLogger's job.
 """
 
 import json
@@ -109,23 +107,10 @@ class AuditComplianceAgent(BaseAgent):
 
 
 def export_to_json(records: list[AuditRecord]) -> str:
-    """
-    Serializes a list of AuditRecords to a JSON array string. Each
-    record becomes a JSON object with the same field names as
-    AuditRecord - suitable for writing directly to a .json file or
-    returning from an API endpoint later.
-    """
     return json.dumps([asdict(r) for r in records], indent=2)
 
 
 def export_to_csv(records: list[AuditRecord]) -> str:
-    """
-    Serializes a list of AuditRecords to a CSV string. Since
-    agent_reasoning_trail is a list (not a flat value), it's joined
-    with ' | ' as a single CSV cell - CSV has no native concept of a
-    nested list, so this is the honest flattening rather than
-    dropping the field or breaking CSV structure.
-    """
     if not records:
         return ""
 
@@ -140,3 +125,77 @@ def export_to_csv(records: list[AuditRecord]) -> str:
         writer.writerow(row)
 
     return output.getvalue()
+
+
+def filter_records(
+    records: list[AuditRecord],
+    user_id: str = None,
+    final_decision: str = None,
+    risk_level: str = None,
+    start_date: str = None,
+    end_date: str = None,
+) -> list[AuditRecord]:
+    """
+    Filters records by any combination of the given criteria - all
+    provided filters must match (AND, not OR). start_date/end_date
+    are ISO timestamp strings compared lexically, which works
+    correctly since AuditRecord.timestamp is always ISO 8601 with a
+    fixed-width format (from datetime.isoformat()).
+    """
+    result = records
+
+    if user_id is not None:
+        result = [r for r in result if r.user_id == user_id]
+    if final_decision is not None:
+        result = [r for r in result if r.final_decision == final_decision]
+    if risk_level is not None:
+        result = [r for r in result if r.risk_level == risk_level]
+    if start_date is not None:
+        result = [r for r in result if r.timestamp >= start_date]
+    if end_date is not None:
+        result = [r for r in result if r.timestamp <= end_date]
+
+    return result
+
+
+def sort_records(records: list[AuditRecord], by: str = "timestamp", descending: bool = False) -> list[AuditRecord]:
+    """
+    Sorts records by any AuditRecord field name. Invalid field names
+    raise AttributeError naturally via getattr - not caught here,
+    since a caller passing a bad field name is a programming error
+    worth surfacing loudly, not silently swallowing.
+    """
+    return sorted(records, key=lambda r: getattr(r, by), reverse=descending)
+
+
+def generate_summary(records: list[AuditRecord]) -> dict:
+    """
+    Rule-based aggregate compliance summary - deliberately NOT
+    LLM-generated (that's out of scope until Phase 4's Ollama
+    integration; deterministic numbers matter more here than
+    natural-language flourish for compliance purposes).
+    """
+    total = len(records)
+
+    if total == 0:
+        return {
+            "total_requests": 0,
+            "decision_breakdown": {},
+            "average_risk_score": 0,
+            "escalation_rate": 0.0,
+        }
+
+    decision_breakdown = {}
+    for record in records:
+        decision_breakdown[record.final_decision] = decision_breakdown.get(record.final_decision, 0) + 1
+
+    average_risk_score = round(sum(r.risk_score for r in records) / total, 1)
+    escalated_count = sum(1 for r in records if r.approver_user_id)
+    escalation_rate = round(escalated_count / total, 3)
+
+    return {
+        "total_requests": total,
+        "decision_breakdown": decision_breakdown,
+        "average_risk_score": average_risk_score,
+        "escalation_rate": escalation_rate,
+    }

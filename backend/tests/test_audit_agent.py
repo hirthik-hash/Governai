@@ -6,6 +6,7 @@ import json
 import csv
 import io
 from agents.audit_agent import export_to_json, export_to_csv
+from agents.audit_agent import filter_records, sort_records, generate_summary
 
 
 
@@ -429,3 +430,124 @@ class TestAuditComplianceAgentFullChainWithEscalation:
         assert record.approver_user_id == "user-004"
         assert len(record.agent_reasoning_trail) == 5
         assert any("approved" in r.lower() for r in record.agent_reasoning_trail)
+
+
+def make_varied_records() -> list:
+    return [
+        AuditRecord("req-1", "2026-09-01T10:00:00+00:00", "user-001", "resource-001",
+                    "access request", "closed", 10, "LOW", "GRANTED", ""),
+        AuditRecord("req-2", "2026-09-02T10:00:00+00:00", "user-001", "resource-002",
+                    "access request", "denied_final", 90, "CRITICAL", "DENIED", ""),
+        AuditRecord("req-3", "2026-09-03T10:00:00+00:00", "user-003", "resource-003",
+                    "access request", "closed", 45, "HIGH", "GRANTED", "user-004"),
+        AuditRecord("req-4", "2026-09-04T10:00:00+00:00", "user-001", "resource-001",
+                    "access request", "closed", 5, "LOW", "GRANTED", ""),
+    ]
+
+
+class TestFilterRecords:
+
+    def test_filter_by_user_id(self):
+        records = make_varied_records()
+        result = filter_records(records, user_id="user-001")
+
+        assert len(result) == 3
+        assert all(r.user_id == "user-001" for r in result)
+
+    def test_filter_by_final_decision(self):
+        records = make_varied_records()
+        result = filter_records(records, final_decision="DENIED")
+
+        assert len(result) == 1
+        assert result[0].request_id == "req-2"
+
+    def test_filter_by_risk_level(self):
+        records = make_varied_records()
+        result = filter_records(records, risk_level="LOW")
+
+        assert len(result) == 2
+
+    def test_filter_by_date_range(self):
+        records = make_varied_records()
+        result = filter_records(
+            records, start_date="2026-09-02T00:00:00+00:00",
+            end_date="2026-09-03T23:59:59+00:00",
+        )
+
+        assert len(result) == 2
+        assert {r.request_id for r in result} == {"req-2", "req-3"}
+
+    def test_combined_filters_are_and_not_or(self):
+        records = make_varied_records()
+        result = filter_records(records, user_id="user-001", final_decision="GRANTED")
+
+        assert len(result) == 2
+        assert all(r.user_id == "user-001" and r.final_decision == "GRANTED" for r in result)
+
+    def test_no_filters_returns_all_records(self):
+        records = make_varied_records()
+        result = filter_records(records)
+
+        assert len(result) == 4
+
+    def test_filter_matching_nothing_returns_empty_list(self):
+        records = make_varied_records()
+        result = filter_records(records, user_id="nonexistent-user")
+
+        assert result == []
+
+
+class TestSortRecords:
+
+    def test_sort_by_timestamp_ascending_default(self):
+        records = make_varied_records()
+        result = sort_records(records)
+
+        assert [r.request_id for r in result] == ["req-1", "req-2", "req-3", "req-4"]
+
+    def test_sort_by_risk_score_descending(self):
+        records = make_varied_records()
+        result = sort_records(records, by="risk_score", descending=True)
+
+        assert [r.request_id for r in result] == ["req-2", "req-3", "req-1", "req-4"]
+
+    def test_sort_does_not_mutate_original_list(self):
+        records = make_varied_records()
+        original_order = [r.request_id for r in records]
+        sort_records(records, by="risk_score", descending=True)
+
+        assert [r.request_id for r in records] == original_order
+
+    def test_sort_by_invalid_field_raises_attribute_error(self):
+        records = make_varied_records()
+        with __import__("pytest").raises(AttributeError):
+            sort_records(records, by="nonexistent_field")
+
+
+class TestGenerateSummary:
+
+    def test_total_requests_count(self):
+        summary = generate_summary(make_varied_records())
+        assert summary["total_requests"] == 4
+
+    def test_decision_breakdown_counts_correctly(self):
+        summary = generate_summary(make_varied_records())
+        assert summary["decision_breakdown"] == {"GRANTED": 3, "DENIED": 1}
+
+    def test_average_risk_score_computed_correctly(self):
+        summary = generate_summary(make_varied_records())
+        # (10 + 90 + 45 + 5) / 4 = 37.5
+        assert summary["average_risk_score"] == 37.5
+
+    def test_escalation_rate_computed_correctly(self):
+        summary = generate_summary(make_varied_records())
+        # 1 of 4 records has a non-empty approver_user_id
+        assert summary["escalation_rate"] == 0.25
+
+    def test_empty_records_list_gives_sensible_zero_summary(self):
+        summary = generate_summary([])
+
+        assert summary["total_requests"] == 0
+        assert summary["decision_breakdown"] == {}
+        assert summary["average_risk_score"] == 0
+        assert summary["escalation_rate"] == 0.0
