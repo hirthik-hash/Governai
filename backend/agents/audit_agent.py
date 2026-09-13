@@ -4,24 +4,55 @@
 Audit & Compliance Agent (GovernAI Agent 5 of 7).
 
 Distinct from DecisionLogger (Day 11): DecisionLogger records WHAT
-happened mechanically. This agent records WHY, holistically - one
-comprehensive AuditRecord per completed request.
+happened mechanically - every FSM state transition, timestamped, in
+real time. This agent records WHY, holistically - one comprehensive
+AuditRecord compiled per completed request, consolidating every
+prior agent's own reasoning (the AgentResult.reasoning field every
+agent has produced since Day 25) into a single human-readable
+compliance trail entry, alongside the final FSM outcome. Both exist
+side by side and answer different questions for different readers -
+DecisionLogger for debugging/replay, this agent for compliance
+review.
 
-Day 49: process() compiles one AuditRecord.
-Day 50: export_to_json() / export_to_csv() for a list of records.
-Day 51: robustness-tested against real-world data shapes (CSV
-special characters, failed-result inclusion, full escalation chains).
-Day 52 (this addition): filter_records() and sort_records() for
-querying a collection of AuditRecords by user/decision/risk level/
-date range, and generate_summary() for aggregate compliance stats
-(total requests, decision breakdown, average risk score, escalation
-rate). generate_summary is deliberately rule-based aggregation, not
-LLM-generated - reliable, deterministic compliance numbers matter
-more here than natural-language flourish, and an LLM summary is
-honestly out of scope until Phase 4's Ollama integration exists.
+Built across Days 49-52:
 
-PDF export remains deferred (Phase 5, when a frontend can request
-it). The real-time dashboard feed remains DecisionLogger's job.
+  - process() (Day 49): compiles one AuditRecord from a completed
+    request's agent_results list plus its final_fsm_state. Does not
+    re-derive any decision logic - only consolidates and presents
+    what already happened. final_decision (GRANTED/DENIED/PENDING)
+    is a presentation label derived from final_fsm_state, not a new
+    source of truth. Reasoning trail inclusion does NOT filter by
+    AgentResult.success - a failed agent's reasoning is included too
+    (Day 51 finding), since a failure is part of what happened to
+    the request and belongs in a compliance record.
+
+  - export_to_json() / export_to_csv() (Day 50): take a LIST of
+    AuditRecords (a real compliance export is almost always "all
+    records for a period," not one at a time). CSV flattens
+    agent_reasoning_trail with " | " since CSV has no native nested-
+    list concept; Python's csv module's automatic quoting correctly
+    handles reasoning strings containing commas/quotes (verified
+    Day 51, not just assumed).
+
+  - filter_records() / sort_records() / generate_summary() (Day 52):
+    query a collection of AuditRecords by user/decision/risk level/
+    date range (combined filters are AND, not OR), sort by any
+    field, and compute aggregate compliance stats (total requests,
+    decision breakdown, average risk score, escalation rate).
+    generate_summary is DELIBERATELY rule-based aggregation, not
+    LLM-generated, despite the original design mentioning an
+    "AI-generated summary" - deterministic, reproducible numbers
+    matter more for compliance than natural-language polish, and an
+    LLM summary is honestly out of scope until Phase 4's Ollama
+    integration exists.
+
+policy_rule_cited exists as an AuditRecord field but is always None
+until Phase 4's Policy Intelligence Agent exists - included now so
+the record's shape won't need to change later.
+
+Deferred: PDF export (needs library infrastructure better suited
+once Phase 5 has a frontend requesting it) and any real-time feed
+(already DecisionLogger's job).
 """
 
 import json
