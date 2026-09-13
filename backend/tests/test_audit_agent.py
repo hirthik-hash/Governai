@@ -2,6 +2,11 @@
 
 from agents.audit_agent import AuditComplianceAgent, AuditRecord
 from agents.base_agent import AgentResult
+import json
+import csv
+import io
+from agents.audit_agent import export_to_json, export_to_csv
+
 
 
 def make_fake_agent_result(reasoning: str) -> AgentResult:
@@ -164,3 +169,109 @@ class TestAuditComplianceAgentFullChainIntegration:
         record = audit_result.data["audit_record"]
         assert record.final_decision == "GRANTED"
         assert len(record.agent_reasoning_trail) == 3
+
+
+def make_sample_record(request_id="req-001", reasoning_trail=None) -> AuditRecord:
+    return AuditRecord(
+        request_id=request_id,
+        timestamp="2026-09-09T14:00:00+00:00",
+        user_id="user-001",
+        resource_id="resource-001",
+        action_requested="access request for resource-001",
+        final_fsm_state="closed",
+        risk_score=10,
+        risk_level="LOW",
+        final_decision="GRANTED",
+        approver_user_id="",
+        agent_reasoning_trail=(
+        ["reasoning one", "reasoning two"]
+        if reasoning_trail is None
+         else reasoning_trail
+        ),
+    )
+
+
+class TestExportToJson:
+
+    def test_exports_valid_json_array(self):
+        records = [make_sample_record()]
+        result = export_to_json(records)
+
+        parsed = json.loads(result)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 1
+
+    def test_json_preserves_all_field_values(self):
+        records = [make_sample_record()]
+        parsed = json.loads(export_to_json(records))[0]
+
+        assert parsed["request_id"] == "req-001"
+        assert parsed["final_decision"] == "GRANTED"
+        assert parsed["agent_reasoning_trail"] == ["reasoning one", "reasoning two"]
+
+    def test_multiple_records_all_present_in_export(self):
+        records = [make_sample_record("req-A"), make_sample_record("req-B")]
+        parsed = json.loads(export_to_json(records))
+
+        assert len(parsed) == 2
+        assert {r["request_id"] for r in parsed} == {"req-A", "req-B"}
+
+    def test_empty_list_exports_empty_json_array(self):
+        result = export_to_json([])
+        assert json.loads(result) == []
+
+
+class TestExportToCsv:
+
+    def test_exports_valid_csv_with_header(self):
+        records = [make_sample_record()]
+        result = export_to_csv(records)
+
+        reader = csv.DictReader(io.StringIO(result))
+        rows = list(reader)
+        assert len(rows) == 1
+        assert "request_id" in reader.fieldnames
+
+    def test_csv_flattens_reasoning_trail_with_pipe_separator(self):
+        records = [make_sample_record(reasoning_trail=["first", "second", "third"])]
+        result = export_to_csv(records)
+
+        reader = csv.DictReader(io.StringIO(result))
+        row = next(reader)
+        assert row["agent_reasoning_trail"] == "first | second | third"
+
+    def test_empty_reasoning_trail_produces_empty_csv_cell(self):
+        records = [make_sample_record(reasoning_trail=[])]
+        result = export_to_csv(records)
+
+        reader = csv.DictReader(io.StringIO(result))
+        row = next(reader)
+        assert row["agent_reasoning_trail"] == ""
+
+    def test_empty_records_list_returns_empty_string(self):
+        assert export_to_csv([]) == ""
+
+    def test_multiple_records_produce_multiple_csv_rows(self):
+        records = [make_sample_record("req-A"), make_sample_record("req-B")]
+        result = export_to_csv(records)
+
+        reader = csv.DictReader(io.StringIO(result))
+        rows = list(reader)
+        assert len(rows) == 2
+
+
+class TestExportRoundTripFromRealAgentOutput:
+
+    def test_agent_produced_record_exports_cleanly_to_both_formats(self):
+        agent = AuditComplianceAgent()
+        result = agent.process({
+            "request_id": "req-export-001", "user_id": "user-001",
+            "final_fsm_state": "closed", "risk_score": 15, "risk_level": "LOW",
+        })
+        record = result.data["audit_record"]
+
+        json_output = export_to_json([record])
+        csv_output = export_to_csv([record])
+
+        assert json.loads(json_output)[0]["request_id"] == "req-export-001"
+        assert "req-export-001" in csv_output
