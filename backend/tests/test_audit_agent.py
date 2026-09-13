@@ -275,3 +275,157 @@ class TestExportRoundTripFromRealAgentOutput:
 
         assert json.loads(json_output)[0]["request_id"] == "req-export-001"
         assert "req-export-001" in csv_output
+
+class TestAuditComplianceAgentSpecialCharactersInCsv:
+
+    def test_reasoning_with_commas_does_not_break_csv_structure(self):
+        record = make_sample_record(reasoning_trail=[
+            "Risk score 45, from triggered factors: unusual_hour, department_mismatch",
+        ])
+        csv_output = export_to_csv([record])
+
+        reader = csv.DictReader(io.StringIO(csv_output))
+        row = next(reader)
+        # csv module should have quoted the field correctly - the
+        # comma-containing string should come back exactly as it went in
+        assert row["agent_reasoning_trail"] == (
+            "Risk score 45, from triggered factors: unusual_hour, department_mismatch"
+        )
+
+    def test_reasoning_with_quotes_does_not_break_csv_structure(self):
+        record = make_sample_record(reasoning_trail=[
+            'Approver said "approved" for this request',
+        ])
+        csv_output = export_to_csv([record])
+
+        reader = csv.DictReader(io.StringIO(csv_output))
+        row = next(reader)
+        assert row["agent_reasoning_trail"] == 'Approver said "approved" for this request'
+
+    def test_multiple_reasoning_entries_with_commas_join_correctly(self):
+        record = make_sample_record(reasoning_trail=[
+            "First, with a comma",
+            "Second, also with a comma",
+        ])
+        csv_output = export_to_csv([record])
+
+        reader = csv.DictReader(io.StringIO(csv_output))
+        row = next(reader)
+        assert row["agent_reasoning_trail"] == "First, with a comma | Second, also with a comma"
+
+
+class TestAuditComplianceAgentFailedResultsInTrail:
+
+    def test_failed_agent_result_reasoning_is_still_included(self):
+        """
+        Documents current behavior explicitly: process()'s filter
+        only checks isinstance and a non-empty reasoning string - it
+        does NOT check result.success. A failed agent's reasoning
+        (e.g. 'Unknown user_id: user-999') is currently included in
+        the audit trail. This is arguably correct for a compliance
+        record - a failure IS part of what happened to this request -
+        but it's a deliberate behavior to lock in and revisit
+        consciously, not leave undiscovered.
+        """
+        agent = AuditComplianceAgent()
+        failed_result = AgentResult(
+            success=False, data={}, reasoning="Access denied: insufficient clearance",
+            errors=["insufficient clearance"],
+        )
+        successful_result = make_fake_agent_result("Request processed normally")
+
+        result = agent.process({
+            "request_id": "req-mixed-001", "user_id": "user-001",
+            "final_fsm_state": "denied_final",
+            "agent_results": [successful_result, failed_result],
+        })
+
+        trail = result.data["audit_record"].agent_reasoning_trail
+        assert "Access denied: insufficient clearance" in trail
+        assert "Request processed normally" in trail
+
+
+class TestAuditComplianceAgentNoneFieldsInExports:
+
+    def test_none_policy_rule_cited_serializes_as_json_null(self):
+        record = make_sample_record()
+        json_output = export_to_json([record])
+        parsed = json.loads(json_output)[0]
+
+        assert parsed["policy_rule_cited"] is None
+
+    def test_none_policy_rule_cited_serializes_as_empty_csv_cell(self):
+        record = make_sample_record()
+        csv_output = export_to_csv([record])
+
+        reader = csv.DictReader(io.StringIO(csv_output))
+        row = next(reader)
+        # Python's csv module writes None as an empty string, not "None"
+        assert row["policy_rule_cited"] == ""
+
+
+class TestAuditComplianceAgentFullChainWithEscalation:
+
+    def test_compiles_correct_record_after_real_escalation_and_approval(self):
+        from agents.request_agent import RequestUnderstandingAgent
+        from agents.validation_agent import AccessValidationAgent
+        from agents.security_agent import SecurityRiskAgent
+        from agents.escalation_agent import EscalationAgent
+        from fsm.governance_fsm import GovernanceFSM
+        from fsm.states import RequestState
+        from datetime import datetime
+
+        fixed_now = lambda: datetime(2026, 9, 9, 14, 0)
+
+        request_agent = RequestUnderstandingAgent()
+        request_result = request_agent.process({
+            "user_id": "user-003", "resource_id": "resource-003",
+        })
+
+        validation_agent = AccessValidationAgent(now_fn=fixed_now)
+        combined = dict(request_result.data)
+        combined["session_token"] = "abc"
+        validation_result = validation_agent.process(combined)
+        combined.update(validation_result.data)
+
+        security_agent = SecurityRiskAgent()
+        combined["user_id"] = "user-003"
+        security_result = security_agent.process(combined)
+        combined.update(security_result.data)
+
+        fsm = GovernanceFSM(request_id="req-audit-escalation-001")
+        fsm.transition(combined)
+        fsm.transition(combined)
+        fsm.transition(combined)
+        state = fsm.transition(combined)
+        assert state == RequestState.ESCALATION_REQUIRED
+
+        escalation_agent = EscalationAgent()
+        combined["request_id"] = "req-audit-escalation-001"
+        escalation_result = escalation_agent.process(combined)
+        combined.update(escalation_result.data)
+        fsm.transition(combined)  # -> MANAGER_REVIEW
+
+        decision_result = escalation_agent.resolve_decision(
+            "req-audit-escalation-001", human_decision="approved",
+        )
+        combined.update(decision_result.data)
+        fsm.transition(combined)  # -> ACCESS_GRANTED
+        fsm.transition(combined)  # -> AUDIT_LOGGING
+        final_state = fsm.transition(combined)  # -> CLOSED
+
+        audit_agent = AuditComplianceAgent()
+        audit_input = dict(combined)
+        audit_input["final_fsm_state"] = final_state.value
+        audit_input["agent_results"] = [
+            request_result, validation_result, security_result,
+            escalation_result, decision_result,
+        ]
+
+        audit_result = audit_agent.process(audit_input)
+        record = audit_result.data["audit_record"]
+
+        assert record.final_decision == "GRANTED"
+        assert record.approver_user_id == "user-004"
+        assert len(record.agent_reasoning_trail) == 5
+        assert any("approved" in r.lower() for r in record.agent_reasoning_trail)
