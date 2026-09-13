@@ -5,26 +5,54 @@ Escalation Agent (GovernAI Agent 4 of 7).
 
 Two distinct responsibilities, at two distinct points in time:
 
-  1. process() (Days 43-44): given a newly-escalated request, find
-     the correct approver (walking the reports_to chain) and record
-     the escalation, starting its timeout clock via an injected
-     EscalationTimeoutTracker. Produces a NotificationRecord.
+  1. process() (Days 43-44) - given a newly-escalated request:
+     a. Finds the correct approver by walking the requester's
+        reports_to chain (added to seed_data.py this same block),
+        skipping anyone without sufficient clearance, stopping at
+        the first qualified person, or falling back to the top of
+        the chain (the CISO) if nobody qualifies. The CISO is always
+        the final approver by default - there's nowhere higher to
+        escalate to, regardless of whether their own clearance
+        nominally "covers" an extreme requirement (Day 43).
+     b. Records the escalation via an injected
+        EscalationTimeoutTracker (built Day 14, unused for 30 days
+        until this agent), starting its timeout clock, and produces
+        a NotificationRecord - a structured, loggable record, NOT a
+        real sent message, since no email/Slack infrastructure
+        exists yet (Day 44).
 
-  2. resolve_decision() (Day 45, this addition): given a request_id
-     that was already escalated via process(), determine the outcome
-     - either a human decision was recorded, or the timeout has
-     fired - and produce the EXACT three FSM-ready flags
-     MANAGER_REVIEW's transitions require: approval_token_valid,
-     rejected, timed_out. These are always produced as a consistent,
-     mutually-exclusive set, since the FSM's rulebook requires
-     exactly one matching condition or it raises
-     AmbiguousTransitionError.
+  2. resolve_decision() (Day 45) - given a request_id already
+     escalated via process(), determines the outcome and returns the
+     exact three FSM-ready flags GovernanceFSM's MANAGER_REVIEW
+     transitions require: approval_token_valid, rejected, timed_out.
+     Always exactly one is True, guaranteed mutually exclusive, so
+     this can never trigger the FSM's AmbiguousTransitionError.
+     Called either with a real human_decision ("approved"/"rejected")
+     or with none, in which case the timeout tracker is consulted.
 
-These are kept as separate methods because they happen at genuinely
-different times, likely called by different things: process() runs
-once, at escalation time. resolve_decision() runs later - either
-when a human actually responds, or when something polls for timeout
-expiry.
+     DELIBERATE POLICY (found and locked in during Day 46's
+     robustness pass): an explicit human_decision is ALWAYS honored,
+     even if the timeout tracker would separately report the request
+     as already timed out - resolve_decision() never checks the
+     tracker when human_decision is provided. A late-but-real human
+     approval overrides an expired timeout. This is a product policy
+     choice worth revisiting deliberately later, not an accidental
+     behavior.
+
+Self-approval edge case (Day 46): if the CISO themselves needs
+escalation, they are immediately their own approver (reports_to=""
+means the chain has nowhere else to go) - correct given there is
+nobody higher, not a bug.
+
+This agent does not check blacklist_match - hard-denial for
+blacklisted users happens in the FSM before ESCALATION_REQUIRED is
+ever reached, so this agent correctly has no opinion on it (Day 46).
+
+Full four-agent chain integration (RequestUnderstandingAgent ->
+AccessValidationAgent -> SecurityRiskAgent -> EscalationAgent ->
+GovernanceFSM), covering the complete MANAGER_REVIEW cycle through
+approval, rejection, and timeout to final FSM states, is in
+tests/test_escalation_agent_fsm_integration.py (Day 47).
 """
 
 from dataclasses import dataclass, field
