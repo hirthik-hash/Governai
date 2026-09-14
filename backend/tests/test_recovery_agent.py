@@ -7,6 +7,8 @@ from agents.recovery_agent import (
     check_agent_heartbeats,
     check_fsm_integrity,
 )
+from fsm.states import SystemState
+from fsm.recovery_fsm import RecoveryFSM
 
 
 class TestDatabaseConnectivityStub:
@@ -120,3 +122,96 @@ class TestFailureRecoveryAgentAggregation:
 
         assert call_count["count"] == 1
         assert len(agent.process({}).data["check_results"]) == 1
+
+
+
+class TestEvaluateAndTransitionHealthySystem:
+
+    def test_all_healthy_keeps_fsm_in_system_normal(self):
+        agent = FailureRecoveryAgent()
+        result = agent.evaluate_and_transition()
+
+        assert result.data["fsm_state"] == "system_normal"
+        assert result.data["fsm_transitioned"] is False  # nothing to transition to
+        assert result.data["critical_failure_detected"] is False
+
+
+class TestEvaluateAndTransitionNonCriticalFailure:
+
+    def test_database_failure_alone_moves_to_degraded_warning_not_safe_mode(self):
+        def failing_database() -> HealthCheckResult:
+            return HealthCheckResult(check_name="database_connectivity", healthy=False, detail="down")
+
+        agent = FailureRecoveryAgent(checks=[failing_database, check_agent_heartbeats, check_fsm_integrity])
+        result = agent.evaluate_and_transition()
+
+        assert result.data["fsm_state"] == "degraded_warning"
+        assert result.data["critical_failure_detected"] is False
+
+    def test_heartbeat_failure_alone_is_not_critical(self):
+        def failing_heartbeats() -> HealthCheckResult:
+            return HealthCheckResult(check_name="agent_heartbeats", healthy=False, detail="one agent broke")
+
+        agent = FailureRecoveryAgent(checks=[check_database_connectivity, failing_heartbeats, check_fsm_integrity])
+        result = agent.evaluate_and_transition()
+
+        assert result.data["fsm_state"] == "degraded_warning"
+        assert result.data["critical_failure_detected"] is False
+
+
+class TestEvaluateAndTransitionCriticalFailure:
+
+    def test_fsm_integrity_failure_is_always_critical(self):
+        def failing_integrity() -> HealthCheckResult:
+            return HealthCheckResult(check_name="fsm_integrity", healthy=False, detail="broken rulebook")
+
+        # Start the FSM already in DEGRADED_WARNING, since
+        # SAFE_MODE_ACTIVE requires coming from there per the rulebook
+        pre_warned_fsm = RecoveryFSM(initial_state=SystemState.DEGRADED_WARNING)
+        agent = FailureRecoveryAgent(
+            checks=[check_database_connectivity, check_agent_heartbeats, failing_integrity],
+            recovery_fsm=pre_warned_fsm,
+        )
+        result = agent.evaluate_and_transition()
+
+        assert result.data["fsm_state"] == "safe_mode_active"
+        assert result.data["critical_failure_detected"] is True
+
+    def test_reasoning_mentions_critical_failure_when_detected(self):
+        def failing_integrity() -> HealthCheckResult:
+            return HealthCheckResult(check_name="fsm_integrity", healthy=False, detail="broken")
+
+        pre_warned_fsm = RecoveryFSM(initial_state=SystemState.DEGRADED_WARNING)
+        agent = FailureRecoveryAgent(checks=[failing_integrity], recovery_fsm=pre_warned_fsm)
+        result = agent.evaluate_and_transition()
+
+        assert "critical" in result.reasoning.lower()
+
+
+class TestEvaluateAndTransitionRecoverySequence:
+
+    def test_full_degrade_and_recover_sequence_using_real_checks(self):
+        """
+        A realistic sequence: system starts healthy, a transient
+        database issue causes a warning, then recovers - using
+        evaluate_and_transition() twice in a row, driving the same
+        shared RecoveryFSM instance both times.
+        """
+        shared_fsm = RecoveryFSM()
+
+        def failing_database() -> HealthCheckResult:
+            return HealthCheckResult(check_name="database_connectivity", healthy=False, detail="timeout")
+
+        agent_during_failure = FailureRecoveryAgent(
+            checks=[failing_database, check_agent_heartbeats, check_fsm_integrity],
+            recovery_fsm=shared_fsm,
+        )
+        first_result = agent_during_failure.evaluate_and_transition()
+        assert first_result.data["fsm_state"] == "degraded_warning"
+
+        agent_after_recovery = FailureRecoveryAgent(
+            checks=[check_database_connectivity, check_agent_heartbeats, check_fsm_integrity],
+            recovery_fsm=shared_fsm,
+        )
+        second_result = agent_after_recovery.evaluate_and_transition()
+        assert second_result.data["fsm_state"] == "system_normal"

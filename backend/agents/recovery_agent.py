@@ -4,39 +4,37 @@
 Failure Recovery Agent (GovernAI Agent 6 of 7).
 
 Monitors system health and drives RecoveryFSM (built and frozen
-Days 8-9, part of v0.1-fsm-core) - which has, until today, only ever
-reacted to manually-passed system_healthy/critical_failure flags in
-tests. This agent is RecoveryFSM's first real caller.
+Days 8-9, part of v0.1-fsm-core) - which has, until Day 55, only
+ever reacted to manually-passed system_healthy/critical_failure
+flags in tests. This agent is RecoveryFSM's first real caller.
 
-Health checks are small, independent, injectable callables - not one
-monolithic method - mirroring SecurityRiskAgent's factor pattern
-(Days 36-38). Today's three checks (Day 54):
+Health checks (Day 54) are small, independent, injectable callables:
+  1. check_database_connectivity() - STUB (no real DB until Phase 3)
+  2. check_agent_heartbeats() - REAL (instantiates all 6 agents)
+  3. check_fsm_integrity() - REAL (live version of Day 18's
+     rulebook completeness tests)
 
-  1. check_database_connectivity() - STUB. No real database exists
-     yet (Phase 3). Honestly labeled as a stub that always reports
-     healthy, not disguised as a real check - faking database
-     connectivity now would be dishonest scope creep.
+Day 55 (this addition): evaluate_and_transition(), which runs all
+checks, translates the aggregate result into the exact context shape
+RecoveryFSM.transition() expects, and actually drives the FSM.
 
-  2. check_agent_heartbeats() - REAL. Attempts to instantiate each
-     of the 5 agents built so far (Days 25-53). A cheap, genuine
-     proxy for "is this agent's code in a working state" - if an
-     agent's constructor raises, something is actually broken.
-
-  3. check_fsm_integrity() - REAL. Reuses the same completeness
-     logic from tests/test_rulebook_completeness.py (Day 18) as a
-     live, callable check - every non-terminal state has an outgoing
-     transition, no orphaned states - rather than only a one-time
-     test assertion.
-
-Days 55+ will wire these into actual RecoveryFSM transitions and add
-the remaining roadmap checks (API response times has no real API
-yet either - Phase 3 - so it's deferred, not faked).
+CRITICALITY POLICY (a deliberate design decision, not arbitrary):
+fsm_integrity failing is ALWAYS treated as critical_failure=True - a
+broken rulebook is a fundamental problem, not a transient blip, and
+per Day 8's rulebook DEGRADED_WARNING -> SAFE_MODE_ACTIVE requires
+critical_failure=True specifically. Any OTHER check failing
+(database, heartbeats) is treated as system_healthy=False but NOT
+automatically critical - this gives the system a chance to recover
+before escalating to the most severe response, mirroring real
+operational practice where not every failed check should
+immediately trip SAFE_MODE_ACTIVE.
 """
 
 from dataclasses import dataclass
 from agents.base_agent import BaseAgent, AgentResult
 from fsm.states import RequestState, SystemState, TERMINAL_REQUEST_STATES
 from fsm.transitions import TRANSITIONS, SYSTEM_TRANSITIONS
+from fsm.recovery_fsm import RecoveryFSM
 
 
 @dataclass
@@ -47,12 +45,6 @@ class HealthCheckResult:
 
 
 def check_database_connectivity() -> HealthCheckResult:
-    """
-    STUB - no real database exists yet (Phase 3, Days 71-73 add real
-    persistence). Always reports healthy. Honestly labeled as a stub
-    in both the docstring and the detail message, not disguised as
-    a real check.
-    """
     return HealthCheckResult(
         check_name="database_connectivity",
         healthy=True,
@@ -61,12 +53,6 @@ def check_database_connectivity() -> HealthCheckResult:
 
 
 def check_agent_heartbeats() -> HealthCheckResult:
-    """
-    Attempts to instantiate each of the 5 agents built so far. A
-    genuine, if minimal, proxy for 'is this agent's code in a
-    working state' - a broken import or constructor error would
-    surface here as a real failure, not a simulated one.
-    """
     from agents.request_agent import RequestUnderstandingAgent
     from agents.validation_agent import AccessValidationAgent
     from agents.security_agent import SecurityRiskAgent
@@ -100,13 +86,6 @@ def check_agent_heartbeats() -> HealthCheckResult:
 
 
 def check_fsm_integrity() -> HealthCheckResult:
-    """
-    Live version of Day 18's rulebook completeness tests: every
-    non-terminal RequestState/SystemState must have at least one
-    outgoing transition, and terminal states must have none. Reuses
-    the exact same logic as tests/test_rulebook_completeness.py, but
-    callable at runtime rather than only as a one-time test.
-    """
     problems = []
 
     for state in RequestState:
@@ -137,20 +116,25 @@ def check_fsm_integrity() -> HealthCheckResult:
     )
 
 
+# Checks whose failure is ALWAYS treated as critical, per the
+# criticality policy above.
+_ALWAYS_CRITICAL_CHECKS = {"fsm_integrity"}
+
+
 class FailureRecoveryAgent(BaseAgent):
     """
-    Runs all registered health checks and aggregates their results.
-    Does not yet drive RecoveryFSM directly - that wiring is Day 55.
-    Today's process() only reports aggregate health.
+    Runs registered health checks, aggregates results, and can drive
+    a RecoveryFSM instance based on the aggregate outcome.
     """
 
-    def __init__(self, checks: list = None):
+    def __init__(self, checks: list = None, recovery_fsm: RecoveryFSM = None):
         super().__init__()
         self._checks = checks or [
             check_database_connectivity,
             check_agent_heartbeats,
             check_fsm_integrity,
         ]
+        self._recovery_fsm = recovery_fsm or RecoveryFSM()
 
     @property
     def agent_name(self) -> str:
@@ -175,5 +159,45 @@ class FailureRecoveryAgent(BaseAgent):
                 f"{len(unhealthy)} of {len(results)} health checks failed: "
                 f"{', '.join(r.check_name for r in unhealthy)}"
             )
+
+        return self._success(data, reasoning)
+
+    def evaluate_and_transition(self) -> AgentResult:
+        """
+        Runs all health checks, derives system_healthy/critical_failure
+        from their results per the criticality policy, and drives the
+        injected RecoveryFSM with that context. Returns the FSM's new
+        state alongside the health check data.
+        """
+        process_result = self.process({})
+        unhealthy_checks = process_result.data["unhealthy_checks"]
+        overall_healthy = process_result.data["overall_healthy"]
+
+        is_critical = any(name in _ALWAYS_CRITICAL_CHECKS for name in unhealthy_checks)
+
+        context = {
+            "system_healthy": overall_healthy,
+            "critical_failure": is_critical,
+        }
+
+        try:
+            new_state = self._recovery_fsm.transition(context)
+            transitioned = True
+        except Exception:
+            # No valid transition from the current RecoveryFSM state
+            # for this context (e.g. already healthy and nothing
+            # changed) - not an error, just nothing to do.
+            new_state = self._recovery_fsm.state
+            transitioned = False
+
+        data = dict(process_result.data)
+        data["fsm_state"] = new_state.value
+        data["fsm_transitioned"] = transitioned
+        data["critical_failure_detected"] = is_critical
+
+        reasoning = (
+            f"{process_result.reasoning} - RecoveryFSM now in {new_state.value}"
+            + (" (critical failure detected)" if is_critical else "")
+        )
 
         return self._success(data, reasoning)
