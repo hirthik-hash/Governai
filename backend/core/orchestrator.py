@@ -164,6 +164,8 @@ class RequestPipeline:
         validation_input["session_token"] = request_data.get("session_token")
         if "role" in request_data:
             validation_input["role"] = request_data["role"]
+        if "is_public_readonly" in request_data:
+            combined["is_public_readonly"] = request_data["is_public_readonly"]
         validation_result = self.validation_agent.process(validation_input)
         agent_results.append(validation_result)
         if not validation_result.success:
@@ -229,3 +231,76 @@ class RequestPipeline:
         audit_input["agent_results"] = agent_results
         audit_result = self.audit_agent.process(audit_input)
         return audit_result.data.get("audit_record") if audit_result.success else None
+
+    def resolve_escalation(self, request_id: str, human_decision: str = None) -> PipelineResult:
+        """
+        Completes a request previously parked by submit_request()
+        when it reached ESCALATION_REQUIRED. human_decision is
+        "approved", "rejected", or None (checks the timeout tracker
+        instead) - see EscalationAgent.resolve_decision() (Day 45)
+        for the exact semantics, including the Day 46 policy that a
+        late human decision always overrides an expired timeout.
+        """
+        if request_id not in self._pending_requests:
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"No pending escalation found for request_id {request_id}"],
+            )
+
+        request_fsm, combined, agent_results = self._pending_requests.pop(request_id)
+
+        decision_result = self.escalation_agent.resolve_decision(
+            request_id,
+            human_decision=human_decision,
+        )
+        agent_results.append(decision_result)
+
+        if not decision_result.success:
+            self._pending_requests[request_id] = (
+                request_fsm,
+                combined,
+                agent_results[:-1],
+            )
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=decision_result.errors,
+            )
+
+        combined.update(decision_result.data)
+
+        try:
+            state = self.safe_mode_processor.process_until_stuck(
+                request_fsm,
+                combined,
+            )
+        except AccessBlockedBySafeModeError as e:
+            audit_record = self._compile_audit(
+                request_id,
+                combined,
+                "blocked_safe_mode",
+                agent_results,
+            )
+            return PipelineResult(
+                request_id=request_id,
+                status="blocked_safe_mode",
+                fsm_state="blocked_safe_mode",
+                audit_record=audit_record,
+                errors=[str(e)],
+            )
+
+        audit_record = self._compile_audit(
+            request_id,
+            combined,
+            state.value,
+            agent_results,
+        )
+        status = "granted" if state == RequestState.CLOSED else "denied"
+
+        return PipelineResult(
+            request_id=request_id,
+            status=status,
+            fsm_state=state.value,
+            audit_record=audit_record,
+        )
