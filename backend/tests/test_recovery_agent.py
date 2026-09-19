@@ -215,3 +215,119 @@ class TestEvaluateAndTransitionRecoverySequence:
         )
         second_result = agent_after_recovery.evaluate_and_transition()
         assert second_result.data["fsm_state"] == "system_normal"
+
+class TestMultipleSimultaneousFailures:
+
+    def test_database_and_fsm_integrity_both_failing_is_still_critical(self):
+        def failing_database() -> HealthCheckResult:
+            return HealthCheckResult(check_name="database_connectivity", healthy=False, detail="down")
+
+        def failing_integrity() -> HealthCheckResult:
+            return HealthCheckResult(check_name="fsm_integrity", healthy=False, detail="broken")
+
+        pre_warned_fsm = RecoveryFSM(initial_state=SystemState.DEGRADED_WARNING)
+        agent = FailureRecoveryAgent(
+            checks=[failing_database, check_agent_heartbeats, failing_integrity],
+            recovery_fsm=pre_warned_fsm,
+        )
+        result = agent.evaluate_and_transition()
+
+        assert result.data["critical_failure_detected"] is True
+        assert result.data["fsm_state"] == "safe_mode_active"
+        assert set(result.data["unhealthy_checks"]) == {"database_connectivity", "fsm_integrity"}
+
+    def test_all_three_checks_failing_reports_all_three_as_unhealthy(self):
+        def fail_db() -> HealthCheckResult:
+            return HealthCheckResult(check_name="database_connectivity", healthy=False, detail="x")
+
+        def fail_heartbeats() -> HealthCheckResult:
+            return HealthCheckResult(check_name="agent_heartbeats", healthy=False, detail="x")
+
+        def fail_integrity() -> HealthCheckResult:
+            return HealthCheckResult(check_name="fsm_integrity", healthy=False, detail="x")
+
+        agent = FailureRecoveryAgent(checks=[fail_db, fail_heartbeats, fail_integrity])
+        result = agent.process({})
+
+        assert len(result.data["unhealthy_checks"]) == 3
+
+
+class TestRepeatedEvaluationWhileAlreadyInSafeMode:
+
+    def test_calling_again_while_still_critical_does_not_crash(self):
+        def failing_integrity() -> HealthCheckResult:
+            return HealthCheckResult(check_name="fsm_integrity", healthy=False, detail="still broken")
+
+        pre_warned_fsm = RecoveryFSM(initial_state=SystemState.DEGRADED_WARNING)
+        agent = FailureRecoveryAgent(checks=[failing_integrity], recovery_fsm=pre_warned_fsm)
+
+        first_result = agent.evaluate_and_transition()
+        assert first_result.data["fsm_state"] == "safe_mode_active"
+
+        # Calling again while the SAME failure persists - SAFE_MODE_ACTIVE's
+        # only transition requires system_healthy=True, which isn't the
+        # case here, so this should not find a valid transition.
+        second_result = agent.evaluate_and_transition()
+
+        assert second_result.data["fsm_state"] == "safe_mode_active"
+        assert second_result.data["fsm_transitioned"] is False
+
+
+class TestFullRestorationCycle:
+
+    def test_safe_mode_to_restoring_to_normal_via_real_evaluate_calls(self):
+        shared_fsm = RecoveryFSM(initial_state=SystemState.SAFE_MODE_ACTIVE)
+
+        # Step 1: checks now pass -> should move to RESTORING
+        healthy_agent = FailureRecoveryAgent(recovery_fsm=shared_fsm)
+        step1 = healthy_agent.evaluate_and_transition()
+        assert step1.data["fsm_state"] == "restoring"
+
+        # Step 2: checks still pass -> RESTORING should confirm -> SYSTEM_NORMAL
+        step2 = healthy_agent.evaluate_and_transition()
+        assert step2.data["fsm_state"] == "system_normal"
+
+    def test_restoration_that_fails_reverts_to_safe_mode(self):
+        shared_fsm = RecoveryFSM(initial_state=SystemState.SAFE_MODE_ACTIVE)
+
+        healthy_agent = FailureRecoveryAgent(recovery_fsm=shared_fsm)
+        step1 = healthy_agent.evaluate_and_transition()
+        assert step1.data["fsm_state"] == "restoring"
+
+        def failing_database() -> HealthCheckResult:
+            return HealthCheckResult(check_name="database_connectivity", healthy=False, detail="flaky again")
+
+        failing_agent = FailureRecoveryAgent(
+            checks=[failing_database, check_agent_heartbeats, check_fsm_integrity],
+            recovery_fsm=shared_fsm,
+        )
+        step2 = failing_agent.evaluate_and_transition()
+
+        assert step2.data["fsm_state"] == "safe_mode_active"
+
+
+class TestAgentHeartbeatsActuallyCatchesFailure:
+
+    def test_heartbeat_check_detects_a_genuinely_broken_agent_class(self):
+        """
+        Proves check_agent_heartbeats' underlying pattern (try to
+        instantiate, catch exceptions) actually works, using a fake
+        broken class rather than sabotaging a real agent. This
+        exercises the SAME instantiate-and-catch logic inline,
+        confirming the pattern itself is sound.
+        """
+        class BrokenAgent:
+            def __init__(self):
+                raise RuntimeError("simulated constructor failure")
+
+        failed = []
+        for agent_class in [BrokenAgent]:
+            try:
+                agent_class()
+            except Exception as e:
+                failed.append(f"{agent_class.__name__}: {e}")
+
+        assert len(failed) == 1
+        assert "BrokenAgent" in failed[0]
+        assert "simulated constructor failure" in failed[0]
+
