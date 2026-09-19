@@ -3,31 +3,54 @@
 """
 Failure Recovery Agent (GovernAI Agent 6 of 7).
 
-Monitors system health and drives RecoveryFSM (built and frozen
-Days 8-9, part of v0.1-fsm-core) - which has, until Day 55, only
-ever reacted to manually-passed system_healthy/critical_failure
-flags in tests. This agent is RecoveryFSM's first real caller.
+Monitors system health and drives RecoveryFSM - built and frozen
+Days 8-9 as part of v0.1-fsm-core, and until Day 55, exercised only
+by manually-passed system_healthy/critical_failure flags in tests
+for 45 straight days. This agent is RecoveryFSM's first genuine
+caller.
 
-Health checks (Day 54) are small, independent, injectable callables:
-  1. check_database_connectivity() - STUB (no real DB until Phase 3)
-  2. check_agent_heartbeats() - REAL (instantiates all 6 agents)
-  3. check_fsm_integrity() - REAL (live version of Day 18's
-     rulebook completeness tests)
+Built across Days 54-58:
 
-Day 55 (this addition): evaluate_and_transition(), which runs all
-checks, translates the aggregate result into the exact context shape
-RecoveryFSM.transition() expects, and actually drives the FSM.
+  - Three independent, injectable health checks (Day 54), mirroring
+    SecurityRiskAgent's factor pattern:
+      1. check_database_connectivity() - STUB, honestly labeled.
+         No real database exists until Phase 3.
+      2. check_agent_heartbeats() - REAL. Instantiates all 5 other
+         agents; a genuine (if minimal) proxy for "is this agent's
+         code in a working state."
+      3. check_fsm_integrity() - REAL. Live version of Day 18's
+         static rulebook-completeness tests, callable at runtime.
 
-CRITICALITY POLICY (a deliberate design decision, not arbitrary):
-fsm_integrity failing is ALWAYS treated as critical_failure=True - a
-broken rulebook is a fundamental problem, not a transient blip, and
-per Day 8's rulebook DEGRADED_WARNING -> SAFE_MODE_ACTIVE requires
-critical_failure=True specifically. Any OTHER check failing
-(database, heartbeats) is treated as system_healthy=False but NOT
-automatically critical - this gives the system a chance to recover
-before escalating to the most severe response, mirroring real
-operational practice where not every failed check should
-immediately trip SAFE_MODE_ACTIVE.
+  - evaluate_and_transition() (Day 55): runs all checks and drives
+    the injected RecoveryFSM. CRITICALITY POLICY: fsm_integrity
+    failing is ALWAYS critical_failure=True (a broken rulebook is
+    fundamental, not transient) - any other check failing alone is
+    system_healthy=False but NOT automatically critical, giving the
+    system room to self-recover via DEGRADED_WARNING before
+    SAFE_MODE_ACTIVE triggers. Verified against multi-failure
+    combinations and the full SAFE_MODE_ACTIVE -> RESTORING ->
+    SYSTEM_NORMAL cycle, including restoration that fails and
+    reverts (Day 57).
+
+  - Live safe-mode gate integration (Day 56): proved the full real
+    chain - genuine health-check failure -> RecoveryFSM -> shared
+    instance -> SystemAwareRequestProcessor (Day 10) - blocks/allows
+    requests correctly with ZERO manual FSM manipulation, the first
+    test of that gate not to hand-force RecoveryFSM's state.
+
+  - Six-agent chain integration (Day 58): the fullest chain built so
+    far, covering both the healthy-system full lifecycle and the
+    safe-mode-blocked case. Notable finding: a request blocked by
+    the safe-mode gate has no natural mapping in
+    AuditComplianceAgent's _DECISION_LABELS (GRANTED/DENIED) since
+    the block happens outside the FSM's own state machine - it
+    correctly falls through to PENDING, the honest answer, not a
+    gap to paper over.
+
+This agent does not itself decide access outcomes - it only reports
+system health and drives RecoveryFSM's state. Access decisions
+remain the FSM's alone, exactly as every other agent in this
+project defers to it.
 """
 
 from dataclasses import dataclass
