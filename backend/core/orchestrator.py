@@ -157,8 +157,26 @@ class RequestPipeline:
         # In-memory pending-requests store: request_id -> (GovernanceFSM, context dict, [AgentResult, ...])
         self._pending_requests: dict = {}
 
+        # Every AuditRecord compiled by this pipeline, in order (Day 70).
+        # In-memory like the pending store - Days 71-75 replace both
+        # with real persistence. A request can appear more than once
+        # (e.g. a safe-mode-blocked PENDING record, then its final one).
+        self.audit_records: list = []
+
     def submit_request(self, request_data: dict) -> PipelineResult:
         request_id = request_data.get("request_id", f"req-{id(request_data)}")
+
+        # Day 70: fail loud instead of silently overwriting a parked
+        # escalation. Checked before any agent runs, so a rejected
+        # duplicate has no side effects (no history, geo or timeout
+        # state is touched). Duplicate ids of COMPLETED requests are
+        # not detected here - that becomes a DB unique constraint.
+        if request_id in self._pending_requests:
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"Duplicate request_id {request_id}: an escalation with this id is already pending"],
+            )
 
         agent_results: list = []
 
@@ -250,7 +268,25 @@ class RequestPipeline:
         audit_input["final_fsm_state"] = final_fsm_state
         audit_input["agent_results"] = agent_results
         audit_result = self.audit_agent.process(audit_input)
-        return audit_result.data.get("audit_record") if audit_result.success else None
+        audit_record = audit_result.data.get("audit_record") if audit_result.success else None
+        if audit_record is not None:
+            self.audit_records.append(audit_record)
+        return audit_record
+
+    def has_pending_request(self, request_id: str) -> bool:
+        return request_id in self._pending_requests
+
+    def list_pending_notifications(self) -> list:
+        """
+        The NotificationRecord of every escalation still awaiting a
+        decision, in submission order. Public read access so callers
+        (the API) never reach into _pending_requests directly.
+        """
+        return [
+            combined["notification"]
+            for _fsm, combined, _results in self._pending_requests.values()
+            if combined.get("notification") is not None
+        ]
 
     def resolve_escalation(self, request_id: str, human_decision: str = None) -> PipelineResult:
         """

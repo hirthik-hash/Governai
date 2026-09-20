@@ -24,6 +24,7 @@ Run a SINGLE uvicorn worker until state moves to Redis/DB (Days 80-81).
 from fastapi import FastAPI
 
 from agents.recovery_agent import FailureRecoveryAgent
+from api.routes.audit import router as audit_router
 from api.routes.health import router as health_router
 from api.routes.requests import router as requests_router
 from core.orchestrator import RequestPipeline
@@ -46,4 +47,5 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(requests_router)
+    app.include_router(audit_router)
     return app

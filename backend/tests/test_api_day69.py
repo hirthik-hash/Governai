@@ -160,10 +160,10 @@ class TestEscalationResolution:
         assert resolved.status_code == 200
         assert resolved.json()["status"] == "denied"
 
-    def test_unknown_request_id_is_an_error(self, client):
+    def test_unknown_request_id_is_a_404(self, client):
         response = client.post("/requests/req-nope/resolve", json={"decision": "approved"})
 
-        assert response.status_code == 400
+        assert response.status_code == 404
         assert response.json()["status"] == "error"
 
     def test_resolving_twice_fails_the_second_time(self, client):
@@ -172,7 +172,7 @@ class TestEscalationResolution:
 
         second = client.post("/requests/req-esc-003/resolve", json={"decision": "approved"})
 
-        assert second.status_code == 400
+        assert second.status_code == 404
 
     def test_invalid_decision_is_rejected_by_schema(self, client):
         client.post("/requests", json={**ESCALATING, "request_id": "req-esc-004"})
@@ -223,4 +223,4 @@ class TestSharedStateAndIsolation:
 
         response = app_b.post("/requests/req-iso-001/resolve", json={"decision": "approved"})
 
-        assert response.status_code == 400
+        assert response.status_code == 404

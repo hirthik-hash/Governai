@@ -83,3 +83,20 @@ class SystemHealthResponse(BaseModel):
 class EvaluateResponse(SystemHealthResponse):
     fsm_transitioned: bool
     critical_failure_detected: bool
+
+
+class PendingEscalationsResponse(BaseModel):
+    count: int
+    pending: list[dict[str, Any]]
+
+
+class AuditListResponse(BaseModel):
+    count: int
+    records: list[dict[str, Any]]
+
+
+class AuditSummaryResponse(BaseModel):
+    total_requests: int
+    decision_breakdown: dict[str, int]
+    average_risk_score: float
+    escalation_rate: float
