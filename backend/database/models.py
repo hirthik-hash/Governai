@@ -9,18 +9,22 @@ User/Resource dataclasses and never import SQLAlchemy; each model here
 converts to and from its dataclass via to_domain()/from_domain(). That
 keeps the deterministic core independent of the storage engine.
 
-Day 72 adds audit records; Day 73 adds the decision log and policies.
+Day 72 adds audit records; Day 73 adds the decision log and the policy
+document tables.
 """
 
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, Boolean, CheckConstraint, Enum as SAEnum, ForeignKey, Index, Integer, String, event, text,
+    JSON, Boolean, CheckConstraint, Enum as SAEnum, ForeignKey, Index, Integer, String,
+    UniqueConstraint, event, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from agents.audit_agent import AuditRecord
+from core.decision_logger import LogEntry, LogEntryType
 from data.seed_data import Resource, Sensitivity, User
+from database.serialization import to_json_safe
 
 MIN_CLEARANCE = 0
 MAX_CLEARANCE = 5
@@ -118,8 +122,33 @@ class ResourceModel(Base):
         )
 
 
-class AuditRecordImmutableError(Exception):
+class AppendOnlyViolationError(Exception):
+    """Raised when code tries to UPDATE or DELETE a row in an append-only table."""
+
+
+class AuditRecordImmutableError(AppendOnlyViolationError):
     """Raised when code tries to UPDATE or DELETE a stored audit record."""
+
+
+class DecisionLogImmutableError(AppendOnlyViolationError):
+    """Raised when code tries to UPDATE or DELETE a stored decision log entry."""
+
+
+def _make_append_only(model_cls, error_cls, noun: str) -> None:
+    """
+    Stops the ORM (Session.add/flush/delete) from changing a stored row.
+    It does NOT stop raw SQL or a bulk UPDATE/DELETE statement - real
+    enforcement is database privileges (an INSERT-only role for the
+    application), a Day 172 security-review item.
+    """
+    def _refuse_update(_mapper, _connection, target):
+        raise error_cls(f"{noun} {target.id} is append-only and cannot be updated")
+
+    def _refuse_delete(_mapper, _connection, target):
+        raise error_cls(f"{noun} {target.id} is append-only and cannot be deleted")
+
+    event.listen(model_cls, "before_update", _refuse_update)
+    event.listen(model_cls, "before_delete", _refuse_delete)
 
 
 _FINAL_DECISION_SQL = "final_decision IN ('GRANTED', 'DENIED')"
@@ -213,19 +242,117 @@ class AuditRecordModel(Base):
         )
 
 
-# Append-only guard. This stops the ORM (Session.add/flush/delete) from
-# changing a stored record. It does NOT stop raw SQL or a bulk
-# UPDATE/DELETE statement - real enforcement is database privileges
-# (an INSERT-only role for the application), a Day 172 security-review item.
-@event.listens_for(AuditRecordModel, "before_update")
-def _audit_records_cannot_be_updated(_mapper, _connection, target):
-    raise AuditRecordImmutableError(
-        f"Audit record {target.id} (request {target.request_id}) is append-only and cannot be updated"
-    )
+_make_append_only(AuditRecordModel, AuditRecordImmutableError, "Audit record")
 
 
-@event.listens_for(AuditRecordModel, "before_delete")
-def _audit_records_cannot_be_deleted(_mapper, _connection, target):
-    raise AuditRecordImmutableError(
-        f"Audit record {target.id} (request {target.request_id}) is append-only and cannot be deleted"
+class DecisionLogEntryModel(Base):
+    """
+    Persistent form of core.decision_logger.LogEntry (Day 73): every FSM
+    transition and safe-mode block, append-only.
+
+    The CHECK constraints encode what the logger actually guarantees, so
+    a malformed entry is refused by the database:
+      - only system transitions have no request_id (they belong to the
+        system, not to a request);
+      - transitions carry both states; a safe-mode block carries neither.
+    """
+    __tablename__ = "decision_log_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "(entry_type = 'system_transition') = (request_id IS NULL)",
+            name="ck_decision_log_request_id_matches_type",
+        ),
+        CheckConstraint(
+            "(entry_type = 'safe_mode_block' AND from_state IS NULL AND to_state IS NULL) "
+            "OR (entry_type <> 'safe_mode_block' AND from_state IS NOT NULL AND to_state IS NOT NULL)",
+            name="ck_decision_log_states_match_type",
+        ),
+        Index("ix_decision_log_entries_request_id", "request_id"),
     )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_type: Mapped[LogEntryType] = mapped_column(
+        SAEnum(
+            LogEntryType,
+            name="log_entry_type",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False)
+    # NULL where the dataclass uses "".
+    from_state: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    to_state: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # A JSON-safe rendering of the context (see database/serialization.py).
+    context_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    def to_domain(self) -> LogEntry:
+        return LogEntry(
+            entry_type=self.entry_type,
+            timestamp=self.timestamp,
+            description=self.description,
+            from_state=self.from_state or "",
+            to_state=self.to_state or "",
+            request_id=self.request_id or "",
+            context_snapshot=dict(self.context_snapshot),
+        )
+
+    @classmethod
+    def from_domain(cls, entry: LogEntry) -> "DecisionLogEntryModel":
+        return cls(
+            entry_type=entry.entry_type,
+            timestamp=entry.timestamp,
+            description=entry.description,
+            from_state=entry.from_state or None,
+            to_state=entry.to_state or None,
+            request_id=entry.request_id or None,
+            context_snapshot=to_json_safe(entry.context_snapshot),
+        )
+
+
+_make_append_only(DecisionLogEntryModel, DecisionLogImmutableError, "Decision log entry")
+
+
+class PolicyDocumentModel(Base):
+    """
+    An ingested policy document (Day 73). Deliberately minimal: Phase 4
+    (Days 86-88) decides what ingestion really needs to record and may
+    add columns then. There is no domain dataclass yet for the same
+    reason. Policy documents are advisory reference material for the
+    Policy Intelligence Agent - they never feed the FSM - so unlike the
+    ledger they may be deleted.
+    """
+    __tablename__ = "policy_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    source_filename: Mapped[str] = mapped_column(String, nullable=False)
+    uploaded_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class PolicyChunkModel(Base):
+    """
+    One paragraph chunk of a policy document. (document_id, chunk_index)
+    is unique and chunk_index is stable per document: the Policy Q&A
+    citations ([Excerpt N]) will point at these indices, so they must
+    never be reused or renumbered under an existing document.
+    """
+    __tablename__ = "policy_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_policy_chunks_document_index"),
+        CheckConstraint("chunk_index >= 0", name="ck_policy_chunks_index_non_negative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Deleting a document deletes its chunks (enforced by the database,
+    # which is why SQLite must run with foreign keys ON - see session.py).
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("policy_documents.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
