@@ -162,6 +162,8 @@ class RequestPipeline:
 
         validation_input = dict(combined)
         validation_input["session_token"] = request_data.get("session_token")
+        validation_input["session_expired"] = request_data.get("session_expired", False)
+
         if "role" in request_data:
             validation_input["role"] = request_data["role"]
         if "is_public_readonly" in request_data:
@@ -290,17 +292,32 @@ class RequestPipeline:
                 errors=[str(e)],
             )
 
-        audit_record = self._compile_audit(
-            request_id,
-            combined,
-            state.value,
-            agent_results,
-        )
-        status = "granted" if state == RequestState.CLOSED else "denied"
+
+        if state == RequestState.CLOSED:
+            audit_record = self._compile_audit(
+                request_id, combined, state.value, agent_results
+            )
+            return PipelineResult(
+                request_id=request_id,
+                status="granted",
+                fsm_state=state.value,
+                audit_record=audit_record,
+            )
+
+        if state in TERMINAL_REQUEST_STATES:
+            audit_record = self._compile_audit(
+                request_id, combined, state.value, agent_results
+            )
+            return PipelineResult(
+                request_id=request_id,
+                status="denied",
+                fsm_state=state.value,
+                audit_record=audit_record,
+            )
 
         return PipelineResult(
             request_id=request_id,
-            status=status,
+            status="error",
             fsm_state=state.value,
-            audit_record=audit_record,
+            errors=[f"Pipeline stuck in unexpected state: {state.value}"],
         )

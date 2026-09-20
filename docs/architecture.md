@@ -227,3 +227,27 @@ As of Day 16: **60 passing tests** across:
 
 **Not yet built:** any of the 7 agents, database persistence, API
 layer, frontend, or real health-check logic driving `RecoveryFSM`.
+
+### v0.2-agent-layer (Phase 2 complete — Days 21–67)
+
+- Six of seven agents built and tested: RequestUnderstandingAgent,
+  AccessValidationAgent, SecurityRiskAgent (all 6 risk factors),
+  EscalationAgent, AuditComplianceAgent, FailureRecoveryAgent
+- RequestPipeline orchestrator formalizing the six-agent chain,
+  with `submit_request()` and `resolve_escalation()` as its public
+  interface
+- FailureRecoveryAgent gives RecoveryFSM (frozen since Day 9) its
+  first genuine health signal after 45 days of manual-flag-only testing
+- Full compliance reporting layer: AuditRecord compilation, JSON/CSV
+  export, filter/sort/summary, cross-validated against DecisionLogger
+  across realistic multi-request sessions
+- Real role-override, timeout-resolution, and stateful-risk-factor
+  persistence all verified through the pipeline's public interface,
+  not just at the individual-agent level
+
+**Deferred to Phase 4:** Agent 7 (Policy Intelligence), which depends
+on Ollama integration not yet built.
+
+**Deferred to Phase 3:** real database persistence (pending requests
+currently live in an in-memory dict), real session/JWT validation,
+real API layer exposing `RequestPipeline` over HTTP.

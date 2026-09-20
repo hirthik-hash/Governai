@@ -326,3 +326,4 @@ class TestRequestUnderstandingAgentRobustness:
 
         assert result.success is False
         assert "no resource" in result.reasoning.lower() or "no resource" in " ".join(result.errors).lower()
+
