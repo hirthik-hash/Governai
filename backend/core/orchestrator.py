@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from fsm.governance_fsm import GovernanceFSM
 from fsm.states import RequestState, TERMINAL_REQUEST_STATES
 from fsm.recovery_fsm import RecoveryFSM
+from fsm.transitions import manager_approved
 from core.decision_logger import DecisionLogger
 from core.request_history_tracker import RequestHistoryTracker
 from core.geo_anomaly_detector import GeoAnomalyDetector
@@ -61,8 +62,25 @@ class SystemAwareRequestProcessor:
         self.recovery_fsm = recovery_fsm
         self.logger = logger or DecisionLogger()
 
+    def _is_grant_attempt(self, request_fsm: GovernanceFSM, context: dict) -> bool:
+        """
+        True if the next transition would move this request toward
+        ACCESS_GRANTED. There are exactly two such paths:
+          - AUTHORIZED -> ACCESS_GRANTED (direct authorization)
+          - MANAGER_REVIEW -> ACCESS_GRANTED (approved escalation)
+        Day 68 fix: this originally checked only the first path, so an
+        approved escalation was never gated by safe mode. Rejections
+        and timeouts are deliberately NOT grant attempts - denying
+        access during safe mode is always safe.
+        """
+        if request_fsm.state == RequestState.AUTHORIZED:
+            return True
+        if request_fsm.state == RequestState.MANAGER_REVIEW and manager_approved(context):
+            return True
+        return False
+
     def process(self, request_fsm: GovernanceFSM, context: dict) -> RequestState:
-        if request_fsm.state == RequestState.AUTHORIZED and self.recovery_fsm.is_safe_mode():
+        if self._is_grant_attempt(request_fsm, context) and self.recovery_fsm.is_safe_mode():
             if not context.get("is_public_readonly", False):
                 message = (
                     f"Request {request_fsm.request_id} would be granted access, "
@@ -162,8 +180,8 @@ class RequestPipeline:
 
         validation_input = dict(combined)
         validation_input["session_token"] = request_data.get("session_token")
-        validation_input["session_expired"] = request_data.get("session_expired", False)
-
+        if "session_expired" in request_data:
+            validation_input["session_expired"] = request_data["session_expired"]
         if "role" in request_data:
             validation_input["role"] = request_data["role"]
         if "is_public_readonly" in request_data:
@@ -284,6 +302,10 @@ class RequestPipeline:
                 "blocked_safe_mode",
                 agent_results,
             )
+            # The human decision was valid; only the system is unhealthy.
+            # Keep the request pending (FSM is still in MANAGER_REVIEW) so
+            # the same request can be resolved once safe mode ends.
+            self._pending_requests[request_id] = (request_fsm, combined, agent_results[:-1])
             return PipelineResult(
                 request_id=request_id,
                 status="blocked_safe_mode",
@@ -292,32 +314,29 @@ class RequestPipeline:
                 errors=[str(e)],
             )
 
-
-        if state == RequestState.CLOSED:
-            audit_record = self._compile_audit(
-                request_id, combined, state.value, agent_results
-            )
+        if state not in TERMINAL_REQUEST_STATES:
+            # Day 68 fix: no decision and no timeout yet leaves the FSM
+            # in MANAGER_REVIEW. That is "still pending", not "denied" -
+            # keep the request parked instead of losing it.
+            self._pending_requests[request_id] = (request_fsm, combined, agent_results[:-1])
             return PipelineResult(
                 request_id=request_id,
-                status="granted",
+                status="error",
                 fsm_state=state.value,
-                audit_record=audit_record,
+                errors=[f"Request {request_id} is still awaiting a decision (state: {state.value})"],
             )
 
-        if state in TERMINAL_REQUEST_STATES:
-            audit_record = self._compile_audit(
-                request_id, combined, state.value, agent_results
-            )
-            return PipelineResult(
-                request_id=request_id,
-                status="denied",
-                fsm_state=state.value,
-                audit_record=audit_record,
-            )
+        audit_record = self._compile_audit(
+            request_id,
+            combined,
+            state.value,
+            agent_results,
+        )
+        status = "granted" if state == RequestState.CLOSED else "denied"
 
         return PipelineResult(
             request_id=request_id,
-            status="error",
+            status=status,
             fsm_state=state.value,
-            errors=[f"Pipeline stuck in unexpected state: {state.value}"],
+            audit_record=audit_record,
         )
