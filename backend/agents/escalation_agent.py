@@ -58,7 +58,7 @@ tests/test_escalation_agent_fsm_integration.py (Day 47).
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from agents.base_agent import BaseAgent, AgentResult
-from data.seed_data import get_user
+from data.directory import Directory, SeedDirectory
 from core.timeout_tracker import EscalationTimeoutTracker, UnknownEscalationError
 
 
@@ -87,9 +87,16 @@ class EscalationAgent(BaseAgent):
 
     MAX_CHAIN_DEPTH = 10
 
-    def __init__(self, timeout_tracker: EscalationTimeoutTracker = None):
+    def __init__(
+        self,
+        timeout_tracker: EscalationTimeoutTracker = None,
+        directory: Directory = None,
+    ):
         super().__init__()
         self._timeout_tracker = timeout_tracker or EscalationTimeoutTracker()
+        # Day 75: users are looked up through an injected Directory
+        # (the seed data by default, or the database).
+        self._directory = directory or SeedDirectory()
 
     @property
     def agent_name(self) -> str:
@@ -108,7 +115,7 @@ class EscalationAgent(BaseAgent):
             )
 
         try:
-            requester = get_user(user_id)
+            requester = self._directory.get_user(user_id)
         except ValueError:
             return self._failure(
                 f"Unknown user_id: {user_id}",
@@ -223,7 +230,7 @@ class EscalationAgent(BaseAgent):
                 )
 
             try:
-                current = get_user(current.reports_to)
+                current = self._directory.get_user(current.reports_to)
             except ValueError:
                 raise NoApproverFoundError(
                     f"{current.id}'s reports_to points to nonexistent user"
