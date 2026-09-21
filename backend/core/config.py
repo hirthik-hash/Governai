@@ -2,6 +2,11 @@
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The built-in development secret. It is public (it is in this file), so
+# api.bootstrap.build_app() refuses to start in production while it is
+# still the configured value.
+DEFAULT_JWT_SECRET = "dev-only-secret-change-before-any-real-deployment"
+
 
 class Settings(BaseSettings):
     """
@@ -23,10 +28,13 @@ class Settings(BaseSettings):
     # Redis (Phase 3+)
     redis_url: str = "redis://localhost:6379/0"
 
-    # Auth (Phase 3+)
-    jwt_secret_key: str = "dev-only-secret-change-before-any-real-deployment"
+    # Auth (Phase 3+). The secret must be at least 32 characters.
+    jwt_secret_key: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 60
+    # Development only: the password every demo user gets. Never applied
+    # when app_env is "production".
+    demo_user_password: str = "Demo-Passw0rd-Change-Me"
 
     # Ollama / AI layer (Phase 4+)
     ollama_base_url: str = "http://localhost:11434"
@@ -38,8 +46,6 @@ class Settings(BaseSettings):
     escalation_timeout_seconds: int = 1800
     hard_denial_risk_threshold: int = 85
     escalation_risk_threshold: int = 40
-
-    # backend/core/config.py — add this field to the Settings class
 
     # Logging
     log_level: str = "INFO"

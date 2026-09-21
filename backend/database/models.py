@@ -51,6 +51,11 @@ class UserModel(Base):
     is_blacklisted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # NULL = top of the approval chain (the domain dataclass uses "").
     reports_to: Mapped[Optional[str]] = mapped_column(String, ForeignKey("users.id"), nullable=True)
+    # Argon2 hash (Day 76), NULL = this user cannot log in. Credentials are
+    # not part of the domain User: to_domain()/from_domain() never touch it,
+    # and UserRepository.update() leaves it alone. It is read and written
+    # only through database/credentials.py.
+    password_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     def to_domain(self) -> User:
         return User(

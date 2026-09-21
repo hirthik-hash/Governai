@@ -100,3 +100,23 @@ class AuditSummaryResponse(BaseModel):
     decision_breakdown: dict[str, int]
     average_risk_score: float
     escalation_rate: float
+
+
+class LoginRequest(BaseModel):
+    # Length caps stop a client from making the server hash or store huge input.
+    user_id: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class CurrentUserResponse(BaseModel):
+    user_id: str
+    name: str
+    department: str
+    role: str
+    clearance_level: int

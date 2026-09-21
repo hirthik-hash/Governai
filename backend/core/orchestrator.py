@@ -32,6 +32,7 @@ today to prove the pattern, not to be production-durable.
 from dataclasses import dataclass, field
 from fsm.governance_fsm import GovernanceFSM
 from fsm.states import RequestState, TERMINAL_REQUEST_STATES
+from data.directory import Directory, SeedDirectory
 from fsm.recovery_fsm import RecoveryFSM
 from fsm.transitions import manager_approved
 from core.decision_logger import DecisionLogger
@@ -138,8 +139,12 @@ class RequestPipeline:
         geo_detector: GeoAnomalyDetector = None,
         timeout_tracker: EscalationTimeoutTracker = None,
         decision_logger: DecisionLogger = None,
+        directory: Directory = None,
     ):
-        self.request_agent = RequestUnderstandingAgent()
+        # One Directory shared by every agent that looks up users/resources
+        # (Day 75): seed data by default, or a DatabaseDirectory.
+        self.directory = directory or SeedDirectory()
+        self.request_agent = RequestUnderstandingAgent(directory=self.directory)
         self.validation_agent = AccessValidationAgent()
         self.security_agent = SecurityRiskAgent(
             history_tracker=history_tracker or RequestHistoryTracker(),
@@ -147,6 +152,7 @@ class RequestPipeline:
         )
         self.escalation_agent = EscalationAgent(
             timeout_tracker=timeout_tracker or EscalationTimeoutTracker(),
+            directory=self.directory,
         )
         self.audit_agent = AuditComplianceAgent()
 
