@@ -42,13 +42,32 @@ class TestDevelopmentBuild:
     def test_wrong_password_is_refused(self, dev_client):
         assert dev_client.post("/auth/login", json={"user_id": "user-007", "password": "not-the-password"}).status_code == 401
 
-    def test_the_pipeline_reads_users_and_resources_from_the_database(self, dev_client):
+    def test_the_ciso_is_the_only_admin(self, dev_client):
+        def api_role(user_id):
+            token = dev_client.post("/auth/login", json={"user_id": user_id, "password": "Demo-Passw0rd-Change-Me"}).json()["access_token"]
+            return dev_client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).json()["api_role"]
+
+        assert api_role("user-007") == "admin"
+        assert api_role("user-001") == "user"
+        assert api_role("user-017") == "user"
+
+    def test_the_pipeline_reads_users_and_resources_from_the_database_and_verifies_the_session(self, dev_client):
         # user-017 and resource-018 exist only in the demo dataset, not the seed data.
-        response = dev_client.post("/requests", json={
-            "user_id": "user-017", "resource_id": "resource-018", "session_token": "abc",
-        })
+        token = dev_client.post("/auth/login", json={"user_id": "user-017", "password": "Demo-Passw0rd-Change-Me"}).json()["access_token"]
+
+        response = dev_client.post("/requests", json={"resource_id": "resource-018"}, headers={"Authorization": f"Bearer {token}"})
 
         assert response.json()["status"] == "granted"
+
+    def test_requests_need_a_token(self, dev_client):
+        assert dev_client.post("/requests", json={"resource_id": "resource-018"}).status_code == 401
+
+    def test_the_admin_only_routes_are_protected_in_the_real_wiring(self, dev_client):
+        def token(user_id):
+            return dev_client.post("/auth/login", json={"user_id": user_id, "password": "Demo-Passw0rd-Change-Me"}).json()["access_token"]
+
+        assert dev_client.get("/audit", headers={"Authorization": f"Bearer {token('user-001')}"}).status_code == 403
+        assert dev_client.get("/audit", headers={"Authorization": f"Bearer {token('user-007')}"}).status_code == 200
 
     def test_custom_demo_password_is_honored(self):
         client = TestClient(build_app(_settings(demo_user_password="Another-Demo-Passw0rd"), passwords=FAST))
@@ -71,5 +90,4 @@ class TestProductionBuild:
         client = TestClient(build_app(_settings(app_env="production"), passwords=FAST))
 
         assert client.post("/auth/login", json={"user_id": "user-007", "password": "Demo-Passw0rd-Change-Me"}).status_code == 401
-        response = client.post("/requests", json={"user_id": "user-007", "resource_id": "resource-001", "session_token": "abc"})
-        assert response.status_code == 400  # unknown user: the database is empty
+        assert client.post("/requests", json={"resource_id": "resource-001"}).status_code == 401  # nobody can hold a token

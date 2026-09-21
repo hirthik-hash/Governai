@@ -11,28 +11,38 @@ and the agents - nothing here decides anything.
 from dataclasses import asdict
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.orchestrator import PipelineResult
 
 
 class RequestSubmission(BaseModel):
     """
-    Body of POST /requests. Only user_id is required at the HTTP
-    layer; everything else is optional because RequestPipeline already
-    validates and reports missing/invalid fields as a clean "error"
-    result (Day 64's robustness pass) - one source of truth.
+    Body of POST /requests. Anything the server can know for itself is NOT
+    accepted from the client, and unknown fields are rejected (422) rather
+    than silently ignored, so an old or hostile client finds out:
+
+      user_id            optional; if sent it must equal the token's user.
+      session_token      the server uses the caller's own bearer token.
+      role               the server uses the caller's job title from the
+                         directory. (Accepting it from the client would let
+                         anyone claim "CISO" and bypass clearance checks.)
+      session_expired    a client-controlled flag; sessions are real tokens now.
+      is_public_readonly a client-controlled flag that bypasses the safe-mode
+                         gate; it stays out of the API until a policy defines
+                         which requests genuinely qualify.
+
+    location is still accepted: it is a self-reported risk signal, not an
+    identity or an entitlement, and cannot be verified server-side yet.
     """
-    user_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: Optional[str] = None
     request_id: Optional[str] = None
     resource_id: Optional[str] = None
     resource_name: Optional[str] = None
-    session_token: Optional[str] = None
-    session_expired: Optional[bool] = None
     urgency: Optional[str] = None
-    role: Optional[str] = None
     location: Optional[str] = None
-    is_public_readonly: Optional[bool] = None
 
 
 class ResolveRequest(BaseModel):
@@ -120,3 +130,4 @@ class CurrentUserResponse(BaseModel):
     department: str
     role: str
     clearance_level: int
+    api_role: str

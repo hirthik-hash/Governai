@@ -41,6 +41,10 @@ class UserModel(Base):
             f"clearance_level BETWEEN {MIN_CLEARANCE} AND {MAX_CLEARANCE}",
             name="ck_users_clearance_range",
         ),
+        CheckConstraint(
+            "api_role IN ('user', 'admin')",
+            name="ck_users_api_role",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -56,6 +60,10 @@ class UserModel(Base):
     # and UserRepository.update() leaves it alone. It is read and written
     # only through database/credentials.py.
     password_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # HTTP API permission level (Day 77, see auth/roles.py) - unrelated to
+    # the job title in `role`. Like password_hash it is not part of the
+    # domain User; it is read and written only through database/roles.py.
+    api_role: Mapped[str] = mapped_column(String, nullable=False, default="user", server_default="user")
 
     def to_domain(self) -> User:
         return User(

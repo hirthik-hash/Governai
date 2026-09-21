@@ -9,15 +9,34 @@ comparable time in each case. The specific reason goes to the server log
 only.
 """
 
+from dataclasses import dataclass
+
 from data.directory import Directory
 from data.seed_data import User
 from auth.credentials import CredentialStore
 from auth.errors import AuthenticationError
 from auth.passwords import PasswordService
+from auth.roles import ROLE_ADMIN, InMemoryRoleStore, RoleStore, validate_role
 from auth.tokens import IssuedToken, TokenService
 from core.app_logger import get_logger
 
 logger = get_logger("auth")
+
+
+@dataclass(frozen=True)
+class Principal:
+    """
+    Who is making an authenticated request: the user, their API role
+    (looked up fresh on every request, never read from the token), and
+    the raw token, which the pipeline's session validator re-verifies.
+    """
+    user: User
+    role: str
+    token: str
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ROLE_ADMIN
 
 
 class AuthService:
@@ -28,11 +47,13 @@ class AuthService:
         directory: Directory,
         passwords: PasswordService,
         tokens: TokenService,
+        roles: RoleStore = None,
     ):
         self._credentials = credentials
         self._directory = directory
         self._passwords = passwords
         self._tokens = tokens
+        self._roles = roles or InMemoryRoleStore()
 
     def login(self, user_id: str, password: str) -> IssuedToken:
         stored_hash = self._credentials.get_password_hash(user_id) if user_id else None
@@ -63,6 +84,17 @@ class AuthService:
         except ValueError:
             logger.warning("token for a user that no longer exists: %r", user_id)
             raise AuthenticationError("token subject no longer exists")
+
+    def authenticate_principal(self, token: str) -> Principal:
+        """authenticate_token() plus the user's current API role. Raises AuthenticationError."""
+        user = self.authenticate_token(token)
+        return Principal(user=user, role=self._roles.get_role(user.id), token=token)
+
+    def set_role(self, user_id: str, role: str) -> None:
+        """ValueError for an unknown user or an invalid role."""
+        validate_role(role)
+        self._directory.get_user(user_id)  # raises ValueError for an unknown user
+        self._roles.set_role(user_id, role)
 
     def set_password(self, user_id: str, new_password: str) -> None:
         """Validates the policy, then stores a fresh hash. ValueError if the user is unknown."""

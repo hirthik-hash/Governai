@@ -1,7 +1,7 @@
 # backend/api/app.py
 
 """
-Application factory (Day 69, auth added Day 76).
+Application factory (Day 69; auth Day 76; role-based access Day 77).
 
 create_app() builds ONE RequestPipeline and ONE FailureRecoveryAgent
 per app instance and shares them across every request via app.state.
@@ -34,6 +34,7 @@ from fastapi import FastAPI
 from agents.recovery_agent import FailureRecoveryAgent
 from api.routes.audit import router as audit_router
 from api.routes.auth import router as auth_router
+from api.routes.health import public_router as public_health_router
 from api.routes.health import router as health_router
 from api.routes.requests import router as requests_router
 from auth.credentials import InMemoryCredentialStore
@@ -68,6 +69,7 @@ def create_app(
         tokens=TokenService(secrets.token_urlsafe(48)),
     )
 
+    app.include_router(public_health_router)
     app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(requests_router)

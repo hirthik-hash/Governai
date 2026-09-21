@@ -8,6 +8,7 @@ never overwritten on the next startup.
 """
 
 from auth.credentials import CredentialStore
+from auth.roles import ROLE_ADMIN
 from auth.service import AuthService
 
 
@@ -18,3 +19,9 @@ def seed_demo_credentials(auth_service: AuthService, credentials: CredentialStor
             auth_service.set_password(user_id, password)
             seeded += 1
     return seeded
+
+
+def seed_demo_roles(auth_service: AuthService, admin_user_ids: list[str]) -> None:
+    """Development only: makes the listed users API admins. Safe to repeat."""
+    for user_id in admin_user_ids:
+        auth_service.set_role(user_id, ROLE_ADMIN)

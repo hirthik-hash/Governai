@@ -16,16 +16,18 @@ from fastapi import FastAPI
 
 from api.app import create_app
 from auth.passwords import PasswordService
-from auth.seeding import seed_demo_credentials
+from auth.seeding import seed_demo_credentials, seed_demo_roles
+from auth.session_validator import JwtSessionValidator
 from auth.service import AuthService
 from auth.tokens import TokenService
 from core.config import DEFAULT_JWT_SECRET, Settings, settings
 from core.orchestrator import RequestPipeline
-from data.demo_data import DEMO_RESOURCES, DEMO_USERS
+from data.demo_data import DEMO_ADMIN_USER_IDS, DEMO_RESOURCES, DEMO_USERS
 from database.credentials import DatabaseCredentialStore
 from database.directory import DatabaseDirectory
+from database.roles import DatabaseRoleStore
 from database.seeding import seed_database
-from database.session import init_db, make_engine, make_session_factory, session_scope
+from database.session import check_schema, init_db, make_engine, make_session_factory, session_scope
 
 
 def build_app(app_settings: Settings = settings, passwords: PasswordService = None) -> FastAPI:
@@ -37,6 +39,7 @@ def build_app(app_settings: Settings = settings, passwords: PasswordService = No
 
     engine = make_engine(app_settings.database_url)
     init_db(engine)
+    check_schema(engine)
     session_factory = make_session_factory(engine)
 
     development = not app_settings.is_production()
@@ -46,19 +49,25 @@ def build_app(app_settings: Settings = settings, passwords: PasswordService = No
 
     directory = DatabaseDirectory(session_factory)
     credentials = DatabaseCredentialStore(session_factory)
+    tokens = TokenService(
+        app_settings.jwt_secret_key,
+        app_settings.jwt_algorithm,
+        app_settings.jwt_expiry_minutes,
+    )
     auth_service = AuthService(
         credentials=credentials,
         directory=directory,
         passwords=passwords or PasswordService(),
-        tokens=TokenService(
-            app_settings.jwt_secret_key,
-            app_settings.jwt_algorithm,
-            app_settings.jwt_expiry_minutes,
-        ),
+        tokens=tokens,
+        roles=DatabaseRoleStore(session_factory),
     )
     if development:
         seed_demo_credentials(
             auth_service, credentials, [u.id for u in DEMO_USERS], app_settings.demo_user_password
         )
+        seed_demo_roles(auth_service, DEMO_ADMIN_USER_IDS)
 
-    return create_app(pipeline=RequestPipeline(directory=directory), auth_service=auth_service)
+    # The SAME TokenService signs the tokens AuthService issues and lets
+    # the pipeline verify the session on every request.
+    pipeline = RequestPipeline(directory=directory, session_validator=JwtSessionValidator(tokens))
+    return create_app(pipeline=pipeline, auth_service=auth_service)

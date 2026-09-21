@@ -12,11 +12,12 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Query
 
 from agents.audit_agent import filter_records, generate_summary, sort_records
-from api.dependencies import get_pipeline
+from api.dependencies import get_pipeline, require_admin
 from api.schemas import AuditListResponse, AuditSummaryResponse
 from core.orchestrator import RequestPipeline
 
-router = APIRouter(prefix="/audit", tags=["audit"])
+# Admin only (Day 77): the ledger holds every user's decisions.
+router = APIRouter(prefix="/audit", tags=["audit"], dependencies=[Depends(require_admin)])
 
 # Only real AuditRecord fields the API is willing to sort by. Anything
 # else is a 422 at the boundary; sort_records() itself still raises on

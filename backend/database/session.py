@@ -11,7 +11,7 @@ this module (or running the test suite) never creates a stray .db file.
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -67,6 +67,39 @@ def init_db(engine: Engine) -> None:
     (Phase 3 close-out) real migrations (Alembic) take over.
     """
     Base.metadata.create_all(engine)
+
+
+class SchemaOutOfDateError(RuntimeError):
+    """The database file predates the current models (a column or table is missing)."""
+
+
+def check_schema(engine: Engine) -> None:
+    """
+    Fails loudly, with a plain instruction, if an existing database is
+    missing tables or columns the models expect. create_all() never alters
+    an existing table, so after a model gains a column an old development
+    database would otherwise fail later with an obscure "no such column"
+    error in the middle of a request. (Real migrations - Alembic - replace
+    this once the schema stops moving.)
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    problems = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            problems.append(f"table '{table.name}' is missing")
+            continue
+        existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name not in existing_columns:
+                problems.append(f"column '{table.name}.{column.name}' is missing")
+
+    if problems:
+        raise SchemaOutOfDateError(
+            "The database schema is out of date: " + "; ".join(problems) + ". "
+            "For a development database, delete the file (e.g. governai_dev.db) and it "
+            "will be recreated and reseeded on the next start."
+        )
 
 
 @contextmanager

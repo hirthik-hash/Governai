@@ -40,7 +40,7 @@ from core.request_history_tracker import RequestHistoryTracker
 from core.geo_anomaly_detector import GeoAnomalyDetector
 from core.timeout_tracker import EscalationTimeoutTracker
 from agents.request_agent import RequestUnderstandingAgent
-from agents.validation_agent import AccessValidationAgent
+from agents.validation_agent import AccessValidationAgent, SessionValidator
 from agents.security_agent import SecurityRiskAgent
 from agents.escalation_agent import EscalationAgent
 from agents.audit_agent import AuditComplianceAgent
@@ -140,12 +140,15 @@ class RequestPipeline:
         timeout_tracker: EscalationTimeoutTracker = None,
         decision_logger: DecisionLogger = None,
         directory: Directory = None,
+        session_validator: SessionValidator = None,
     ):
         # One Directory shared by every agent that looks up users/resources
         # (Day 75): seed data by default, or a DatabaseDirectory.
         self.directory = directory or SeedDirectory()
         self.request_agent = RequestUnderstandingAgent(directory=self.directory)
-        self.validation_agent = AccessValidationAgent()
+        # Day 77: the API passes a JwtSessionValidator; everything else keeps
+        # the default placeholder check.
+        self.validation_agent = AccessValidationAgent(session_validator=session_validator)
         self.security_agent = SecurityRiskAgent(
             history_tracker=history_tracker or RequestHistoryTracker(),
             geo_detector=geo_detector or GeoAnomalyDetector(),
@@ -281,6 +284,13 @@ class RequestPipeline:
 
     def has_pending_request(self, request_id: str) -> bool:
         return request_id in self._pending_requests
+
+    def get_pending_notification(self, request_id: str):
+        """The NotificationRecord of one pending escalation, or None."""
+        pending = self._pending_requests.get(request_id)
+        if pending is None:
+            return None
+        return pending[1].get("notification")
 
     def list_pending_notifications(self) -> list:
         """

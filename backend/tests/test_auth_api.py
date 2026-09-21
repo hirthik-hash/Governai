@@ -119,7 +119,7 @@ class TestMe:
         seed = next(u for u in SEED_USERS if u.id == "user-001")
         assert response.json() == {
             "user_id": seed.id, "name": seed.name, "department": seed.department,
-            "role": seed.role, "clearance_level": seed.clearance_level,
+            "role": seed.role, "clearance_level": seed.clearance_level, "api_role": "user",
         }
 
     def test_token_identifies_the_user_not_the_request(self, client):

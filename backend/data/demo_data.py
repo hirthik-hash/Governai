@@ -70,3 +70,8 @@ _EXTRA_RESOURCES: list[Resource] = [
 
 DEMO_USERS: list[User] = list(SEED_USERS) + _EXTRA_USERS
 DEMO_RESOURCES: list[Resource] = list(SEED_RESOURCES) + _EXTRA_RESOURCES
+
+# Who gets the API "admin" role in the development demo (Day 77): the CISO,
+# the root of the approval chain. Production admins are assigned directly
+# in the database - there is deliberately no endpoint that grants roles yet.
+DEMO_ADMIN_USER_IDS: list[str] = ["user-007"]

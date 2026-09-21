@@ -3,11 +3,20 @@
 from fastapi import APIRouter, Depends
 
 from agents.recovery_agent import FailureRecoveryAgent
-from api.dependencies import get_pipeline, get_recovery_agent
+from api.dependencies import get_pipeline, get_recovery_agent, require_admin
 from api.schemas import EvaluateResponse, HealthCheckItem, SystemHealthResponse
 from core.orchestrator import RequestPipeline
 
-router = APIRouter(prefix="/system", tags=["system"])
+# Admin only (Day 77): the checks reveal internals. The unauthenticated
+# liveness probe for load balancers is public_router's /healthz below.
+router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_admin)])
+public_router = APIRouter(tags=["system"])
+
+
+@public_router.get("/healthz")
+async def liveness():
+    """Process-is-up probe. Deliberately reveals nothing about the system."""
+    return {"status": "ok"}
 
 
 def _checks(data: dict) -> list[HealthCheckItem]:
