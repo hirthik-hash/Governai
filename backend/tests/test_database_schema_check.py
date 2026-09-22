@@ -2,6 +2,7 @@
 
 """Day 77: an out-of-date development database fails loudly at startup."""
 
+import fakeredis
 import pytest
 from sqlalchemy import text
 
@@ -11,6 +12,10 @@ from core.config import Settings
 from database.session import SchemaOutOfDateError, check_schema, init_db, make_engine
 
 FAST = PasswordService(time_cost=1, memory_cost=8, parallelism=1)
+
+
+def _redis():
+    return fakeredis.FakeStrictRedis(decode_responses=True)
 
 
 def _old_users_table(engine):
@@ -58,11 +63,11 @@ class TestStartupUsesIt:
         settings = Settings(_env_file=None, database_url=url, jwt_secret_key="k" * 40)
 
         with pytest.raises(SchemaOutOfDateError):
-            build_app(settings, passwords=FAST)
+            build_app(settings, passwords=FAST, redis_client=_redis())
 
     def test_build_app_accepts_a_database_file_it_created_itself(self, tmp_path):
         url = f"sqlite:///{tmp_path / 'fresh.db'}"
         settings = Settings(_env_file=None, database_url=url, jwt_secret_key="k" * 40)
 
-        build_app(settings, passwords=FAST)
-        build_app(settings, passwords=FAST)  # a restart against the same file
+        build_app(settings, passwords=FAST, redis_client=_redis())
+        build_app(settings, passwords=FAST, redis_client=_redis())  # a restart against the same file

@@ -32,6 +32,7 @@ today to prove the pattern, not to be production-durable.
 from dataclasses import dataclass, field
 from fsm.governance_fsm import GovernanceFSM
 from fsm.states import RequestState, TERMINAL_REQUEST_STATES
+from core.distributed_lock import DistributedLock, LockAcquisitionError
 from data.directory import Directory, SeedDirectory
 from fsm.recovery_fsm import RecoveryFSM
 from fsm.transitions import manager_approved
@@ -143,6 +144,7 @@ class RequestPipeline:
         session_validator: SessionValidator = None,
         audit_store=None,
         pending_store=None,
+        distributed_lock: DistributedLock = None,
     ):
         # One Directory shared by every agent that looks up users/resources
         # (Day 75): seed data by default, or a DatabaseDirectory.
@@ -197,9 +199,36 @@ class RequestPipeline:
         if self._pending_store is not None:
             self._restore_pending_from_store()
 
-    def submit_request(self, request_data: dict) -> PipelineResult:
-        request_id = request_data.get("request_id", f"req-{id(request_data)}")
+        # Day 80: optional cross-process lock (core.distributed_lock.
+        # DistributedLock, backed by Redis). None (the default, and every
+        # test before Day 80) means submit_request()/resolve_escalation()
+        # run exactly as before - single-process safety only.
+        self._distributed_lock = distributed_lock
 
+    def submit_request(self, request_data: dict) -> PipelineResult:
+        """
+        Public entry point. Day 80: when a distributed_lock is configured,
+        every request_id is processed under a short-lived Redis lock, so
+        two worker PROCESSES can never both decide the same NEW
+        request_id at once - the exact race Day 79 left as a documented,
+        unsolved gap for a multi-worker deployment. With no lock
+        configured (the default, and every pre-Day-80 test), behavior is
+        identical to before this method existed.
+        """
+        request_id = request_data.get("request_id", f"req-{id(request_data)}")
+        if self._distributed_lock is None:
+            return self._submit_request_locked(request_id, request_data)
+        try:
+            with self._distributed_lock.acquire(f"submit:{request_id}"):
+                return self._submit_request_locked(request_id, request_data)
+        except LockAcquisitionError:
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"Request {request_id} is already being processed by another worker"],
+            )
+
+    def _submit_request_locked(self, request_id: str, request_data: dict) -> PipelineResult:
         # Day 70: fail loud instead of silently overwriting a parked
         # escalation. Checked before any agent runs, so a rejected
         # duplicate has no side effects (no history, geo or timeout
@@ -391,7 +420,25 @@ class RequestPipeline:
         instead) - see EscalationAgent.resolve_decision() (Day 45)
         for the exact semantics, including the Day 46 policy that a
         late human decision always overrides an expired timeout.
+
+        Day 80: locked the same way as submit_request(), so two workers
+        cannot both resolve the same escalation at once (e.g. two admins
+        clicking approve within milliseconds of each other, landing on
+        different processes).
         """
+        if self._distributed_lock is None:
+            return self._resolve_escalation_locked(request_id, human_decision)
+        try:
+            with self._distributed_lock.acquire(f"resolve:{request_id}"):
+                return self._resolve_escalation_locked(request_id, human_decision)
+        except LockAcquisitionError:
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"Request {request_id} is already being resolved by another worker"],
+            )
+
+    def _resolve_escalation_locked(self, request_id: str, human_decision: str = None) -> PipelineResult:
         if request_id not in self._pending_requests:
             return PipelineResult(
                 request_id=request_id,

@@ -8,6 +8,7 @@ cffi==2.1.1
 click==8.5.0
 colorama==0.4.6
 coverage==7.16.0
+fakeredis==2.38.0
 fastapi==0.141.1
 greenlet==3.5.6
 h11==0.16.0
@@ -26,6 +27,8 @@ PyJWT==2.14.0
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dotenv==1.2.3
+redis==8.1.0
+sortedcontainers==2.4.0
 SQLAlchemy==2.0.54
 starlette==1.6.0
 typing-inspection==0.4.4
