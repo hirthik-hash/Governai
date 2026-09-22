@@ -24,6 +24,7 @@ from core.config import DEFAULT_JWT_SECRET, Settings, settings
 from core.orchestrator import RequestPipeline
 from data.demo_data import DEMO_ADMIN_USER_IDS, DEMO_RESOURCES, DEMO_USERS
 from database.credentials import DatabaseCredentialStore
+from database.audit_store import DatabaseAuditStore, PersistentDecisionLogger
 from database.directory import DatabaseDirectory
 from database.roles import DatabaseRoleStore
 from database.seeding import seed_database
@@ -67,7 +68,16 @@ def build_app(app_settings: Settings = settings, passwords: PasswordService = No
         )
         seed_demo_roles(auth_service, DEMO_ADMIN_USER_IDS)
 
-    # The SAME TokenService signs the tokens AuthService issues and lets
-    # the pipeline verify the session on every request.
-    pipeline = RequestPipeline(directory=directory, session_validator=JwtSessionValidator(tokens))
+    # Day 78: the audit ledger and decision log persist to the same
+    # database, and the pipeline refuses a request_id that already has a
+    # final decision - even from a previous run.
+    audit_store = DatabaseAuditStore(session_factory)
+    pipeline = RequestPipeline(
+        directory=directory,
+        session_validator=JwtSessionValidator(tokens),
+        decision_logger=PersistentDecisionLogger(session_factory),
+        audit_store=audit_store,
+    )
+    pipeline.audit_records = audit_store.all()  # restore the ledger's read path after a restart
+
     return create_app(pipeline=pipeline, auth_service=auth_service)

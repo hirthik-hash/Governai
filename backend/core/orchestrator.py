@@ -141,6 +141,7 @@ class RequestPipeline:
         decision_logger: DecisionLogger = None,
         directory: Directory = None,
         session_validator: SessionValidator = None,
+        audit_store=None,
     ):
         # One Directory shared by every agent that looks up users/resources
         # (Day 75): seed data by default, or a DatabaseDirectory.
@@ -166,11 +167,23 @@ class RequestPipeline:
         # In-memory pending-requests store: request_id -> (GovernanceFSM, context dict, [AgentResult, ...])
         self._pending_requests: dict = {}
 
-        # Every AuditRecord compiled by this pipeline, in order (Day 70).
-        # In-memory like the pending store - Days 71-75 replace both
-        # with real persistence. A request can appear more than once
-        # (e.g. a safe-mode-blocked PENDING record, then its final one).
+        # Every AuditRecord compiled by this pipeline, in order (Day 70) -
+        # the fast in-process read path used by the audit routes. A
+        # request can appear more than once (e.g. a safe-mode-blocked
+        # PENDING record, then its final one).
         self.audit_records: list = []
+
+        # Day 78: optional durability layer (database.audit_store.DatabaseAuditStore).
+        # None (the default, and every test's default) means audit records
+        # live only in self.audit_records, exactly as before Day 78.
+        self._audit_store = audit_store
+        # request_ids that have received a GRANTED or DENIED record THIS
+        # process - checked before re-running any agent, so a replayed id
+        # never produces a second final decision even without a database
+        # configured. When an audit_store IS configured, has_final_record()
+        # is also checked, so a replay is caught even from a fresh pipeline
+        # instance after a restart.
+        self._finalized_request_ids: set = set()
 
     def submit_request(self, request_data: dict) -> PipelineResult:
         request_id = request_data.get("request_id", f"req-{id(request_data)}")
@@ -185,6 +198,21 @@ class RequestPipeline:
                 request_id=request_id,
                 status="error",
                 errors=[f"Duplicate request_id {request_id}: an escalation with this id is already pending"],
+            )
+
+        # Day 78: a request_id that already has a final (GRANTED/DENIED)
+        # record - in this process, or (if audit_store is configured) in
+        # the database from a previous run - is refused rather than
+        # re-decided. Checked before any agent runs, exactly like the
+        # pending-duplicate check above, and for the same reason: a
+        # replay must have no side effects, not just a matching answer.
+        if request_id in self._finalized_request_ids or (
+            self._audit_store is not None and self._audit_store.has_final_record(request_id)
+        ):
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"Duplicate request_id {request_id}: this request has already been finalized"],
             )
 
         agent_results: list = []
@@ -280,6 +308,10 @@ class RequestPipeline:
         audit_record = audit_result.data.get("audit_record") if audit_result.success else None
         if audit_record is not None:
             self.audit_records.append(audit_record)
+            if audit_record.final_decision in ("GRANTED", "DENIED"):
+                self._finalized_request_ids.add(audit_record.request_id)
+            if self._audit_store is not None:
+                self._audit_store.add(audit_record)
         return audit_record
 
     def has_pending_request(self, request_id: str) -> bool:

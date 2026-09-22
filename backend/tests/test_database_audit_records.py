@@ -240,14 +240,30 @@ class TestRealPipelineRecordsFit:
         ]
         assert decisions == ["PENDING", "PENDING", "GRANTED"]
 
-    def test_replaying_a_completed_request_id_is_caught_by_the_database(self, session):
+    def test_a_replayed_request_id_is_now_refused_by_the_pipeline_itself(self, session):
+        # Day 78: RequestPipeline now refuses a request_id that already
+        # has a final record BEFORE re-running any agent, so a replay no
+        # longer reaches this table as a second GRANTED/DENIED row. The
+        # test below proves the database's own backstop is still real,
+        # for the case something writes to the table directly.
         pipeline = RequestPipeline()
         first = pipeline.submit_request({"request_id": "s-replay", "user_id": "user-007", "resource_id": "resource-001", "session_token": "abc"})
+
         second = pipeline.submit_request({"request_id": "s-replay", "user_id": "user-007", "resource_id": "resource-001", "session_token": "abc"})
-        session.add(AuditRecordModel.from_domain(first.audit_record))
+
+        assert first.status == "granted"
+        assert second.status == "error"
+        assert "already been finalized" in second.errors[0]
+        assert second.audit_record is None
+
+    def test_two_final_records_for_one_request_id_are_still_caught_by_the_database(self, session):
+        # The backstop from Day 72, now exercised directly against the
+        # table rather than through the pipeline (which refuses this
+        # case earlier - see the test above).
+        session.add(AuditRecordModel.from_domain(_record("s-replay-direct")))
         session.flush()
 
-        session.add(AuditRecordModel.from_domain(second.audit_record))
+        session.add(AuditRecordModel.from_domain(_record("s-replay-direct", final_decision="DENIED")))
 
         with pytest.raises(IntegrityError):
             session.flush()
