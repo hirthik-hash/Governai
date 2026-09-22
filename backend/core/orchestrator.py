@@ -42,7 +42,7 @@ from core.timeout_tracker import EscalationTimeoutTracker
 from agents.request_agent import RequestUnderstandingAgent
 from agents.validation_agent import AccessValidationAgent, SessionValidator
 from agents.security_agent import SecurityRiskAgent
-from agents.escalation_agent import EscalationAgent
+from agents.escalation_agent import EscalationAgent, NotificationRecord
 from agents.audit_agent import AuditComplianceAgent
 from agents.base_agent import AgentResult
 
@@ -142,6 +142,7 @@ class RequestPipeline:
         directory: Directory = None,
         session_validator: SessionValidator = None,
         audit_store=None,
+        pending_store=None,
     ):
         # One Directory shared by every agent that looks up users/resources
         # (Day 75): seed data by default, or a DatabaseDirectory.
@@ -184,6 +185,17 @@ class RequestPipeline:
         # is also checked, so a replay is caught even from a fresh pipeline
         # instance after a restart.
         self._finalized_request_ids: set = set()
+
+        # Day 79: optional durability layer (database.pending_store.
+        # DatabasePendingEscalationStore) for escalations parked awaiting
+        # a human decision. None (the default, and every test's default)
+        # means pending state lives only in self._pending_requests, exactly
+        # as before Day 79. When configured, every park/unpark below is
+        # mirrored to the database, and any escalations left pending from
+        # a previous run are restored into memory right now, below.
+        self._pending_store = pending_store
+        if self._pending_store is not None:
+            self._restore_pending_from_store()
 
     def submit_request(self, request_data: dict) -> PipelineResult:
         request_id = request_data.get("request_id", f"req-{id(request_data)}")
@@ -277,7 +289,7 @@ class RequestPipeline:
             combined.update(escalation_result.data)
             state = self.safe_mode_processor.process(request_fsm, combined)  # -> MANAGER_REVIEW
 
-            self._pending_requests[request_id] = (request_fsm, combined, agent_results)
+            self._park(request_id, request_fsm, combined, agent_results)
 
             return PipelineResult(
                 request_id=request_id, status="pending_approval",
@@ -313,6 +325,41 @@ class RequestPipeline:
             if self._audit_store is not None:
                 self._audit_store.add(audit_record)
         return audit_record
+
+    def _park(self, request_id: str, request_fsm: GovernanceFSM, combined: dict, agent_results: list) -> None:
+        """The single place a request is parked as pending - keeps the in-memory dict and the optional database store in sync."""
+        self._pending_requests[request_id] = (request_fsm, combined, agent_results)
+        if self._pending_store is not None:
+            tracker = self.escalation_agent.timeout_tracker
+            self._pending_store.save(
+                request_id, request_fsm.state.value, combined, agent_results,
+                tracker.sent_at(request_id), tracker.timeout_seconds_for(request_id),
+            )
+
+    def _unpark(self, request_id: str) -> tuple:
+        """The single place a pending request is removed - keeps the in-memory dict and the optional database store in sync."""
+        entry = self._pending_requests.pop(request_id)
+        if self._pending_store is not None:
+            self._pending_store.delete(request_id)
+        return entry
+
+    def _restore_pending_from_store(self) -> None:
+        """
+        Runs once, at construction, before any request is processed:
+        rebuilds every escalation left pending by a previous run into
+        self._pending_requests and re-seeds the timeout tracker with each
+        one's ORIGINAL sent-at time (not "now"), so a request that was
+        already close to timing out before a restart still is after one.
+        """
+        for restored in self._pending_store.load_all():
+            context = dict(restored.context)
+            if context.get("notification") is not None:
+                context["notification"] = NotificationRecord(**context["notification"])
+            request_fsm = GovernanceFSM(request_id=restored.request_id, initial_state=RequestState(restored.fsm_state))
+            self.escalation_agent.timeout_tracker.restore(
+                restored.request_id, restored.timeout_sent_at, restored.timeout_seconds
+            )
+            self._pending_requests[restored.request_id] = (request_fsm, context, list(restored.agent_results))
 
     def has_pending_request(self, request_id: str) -> bool:
         return request_id in self._pending_requests
@@ -352,7 +399,7 @@ class RequestPipeline:
                 errors=[f"No pending escalation found for request_id {request_id}"],
             )
 
-        request_fsm, combined, agent_results = self._pending_requests.pop(request_id)
+        request_fsm, combined, agent_results = self._unpark(request_id)
 
         decision_result = self.escalation_agent.resolve_decision(
             request_id,
@@ -361,11 +408,7 @@ class RequestPipeline:
         agent_results.append(decision_result)
 
         if not decision_result.success:
-            self._pending_requests[request_id] = (
-                request_fsm,
-                combined,
-                agent_results[:-1],
-            )
+            self._park(request_id, request_fsm, combined, agent_results[:-1])
             return PipelineResult(
                 request_id=request_id,
                 status="error",
@@ -389,7 +432,7 @@ class RequestPipeline:
             # The human decision was valid; only the system is unhealthy.
             # Keep the request pending (FSM is still in MANAGER_REVIEW) so
             # the same request can be resolved once safe mode ends.
-            self._pending_requests[request_id] = (request_fsm, combined, agent_results[:-1])
+            self._park(request_id, request_fsm, combined, agent_results[:-1])
             return PipelineResult(
                 request_id=request_id,
                 status="blocked_safe_mode",
@@ -402,7 +445,7 @@ class RequestPipeline:
             # Day 68 fix: no decision and no timeout yet leaves the FSM
             # in MANAGER_REVIEW. That is "still pending", not "denied" -
             # keep the request parked instead of losing it.
-            self._pending_requests[request_id] = (request_fsm, combined, agent_results[:-1])
+            self._park(request_id, request_fsm, combined, agent_results[:-1])
             return PipelineResult(
                 request_id=request_id,
                 status="error",

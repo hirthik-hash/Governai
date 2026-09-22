@@ -48,6 +48,7 @@ class TestSchema:
             assert set(inspect(s.get_bind()).get_table_names()) == {
                 "users", "resources", "audit_records",
                 "decision_log_entries", "policy_documents", "policy_chunks",
+                "pending_escalations",
             }
 
     def test_in_memory_data_is_visible_across_sessions(self, factory):

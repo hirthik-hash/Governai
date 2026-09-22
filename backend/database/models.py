@@ -369,3 +369,36 @@ class PolicyChunkModel(Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class PendingEscalationModel(Base):
+    """
+    A parked escalation awaiting a human decision (Day 79) - MUTABLE
+    working state, unlike audit_records and decision_log_entries: it is
+    updated in place while a decision is pending and DELETED once the
+    request reaches a final outcome. request_id is unique because a
+    request can only be pending once at a time (enforced first, in
+    Python, by RequestPipeline's duplicate-pending check).
+
+    context and agent_results hold the FSM context and the agent chain's
+    results, rendered JSON-safe (see database/serialization.py) because
+    the real objects include an escalation's NotificationRecord
+    dataclass. Neither is queried inside - they exist to reconstruct the
+    exact in-memory state RequestPipeline had before a restart, not to
+    be read as structured data.
+    """
+    __tablename__ = "pending_escalations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # The GovernanceFSM state at the moment it was parked - always
+    # "manager_review" today, but stored rather than assumed so a future
+    # parked state does not require a schema change.
+    fsm_state: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[dict] = mapped_column(JSON, nullable=False)
+    agent_results: Mapped[list] = mapped_column(JSON, nullable=False)
+    # The EscalationTimeoutTracker's own bookkeeping for this request,
+    # persisted so the timeout window is computed from when the
+    # escalation was actually sent, not from when the process restarted.
+    timeout_sent_at: Mapped[str] = mapped_column(String, nullable=False)
+    timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

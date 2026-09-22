@@ -99,6 +99,11 @@ class EscalationAgent(BaseAgent):
         self._directory = directory or SeedDirectory()
 
     @property
+    def timeout_tracker(self) -> EscalationTimeoutTracker:
+        """Read-only access (Day 79) so RequestPipeline can persist/restore timeout state."""
+        return self._timeout_tracker
+
+    @property
     def agent_name(self) -> str:
         return "escalation"
 

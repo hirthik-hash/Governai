@@ -8,8 +8,8 @@ Kept out of main.py so tests can call build_app() with their own Settings
 which would create the development database file as a side effect.
 
 For now the pipeline is database-backed for users and resources and
-in-memory for pending escalations, audit records and the decision log;
-Days 78-79 move those onto the database too.
+and Day 78-79 persist the audit ledger, decision log and pending
+escalations to that same database.
 """
 
 from fastapi import FastAPI
@@ -25,6 +25,7 @@ from core.orchestrator import RequestPipeline
 from data.demo_data import DEMO_ADMIN_USER_IDS, DEMO_RESOURCES, DEMO_USERS
 from database.credentials import DatabaseCredentialStore
 from database.audit_store import DatabaseAuditStore, PersistentDecisionLogger
+from database.pending_store import DatabasePendingEscalationStore
 from database.directory import DatabaseDirectory
 from database.roles import DatabaseRoleStore
 from database.seeding import seed_database
@@ -77,6 +78,7 @@ def build_app(app_settings: Settings = settings, passwords: PasswordService = No
         session_validator=JwtSessionValidator(tokens),
         decision_logger=PersistentDecisionLogger(session_factory),
         audit_store=audit_store,
+        pending_store=DatabasePendingEscalationStore(session_factory),
     )
     pipeline.audit_records = audit_store.all()  # restore the ledger's read path after a restart
 
