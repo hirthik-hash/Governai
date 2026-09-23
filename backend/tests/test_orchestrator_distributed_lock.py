@@ -178,6 +178,53 @@ class TestTwoWorkersRacingOnTheSameResolve:
         assert len(DatabaseAuditStore(db_factory).all()) == 1
 
 
+class TestStaleWorkerCannotDoubleResolve:
+    """
+    Day 80: a deterministic (non-timing-dependent) reproduction of the gap
+    the threaded test above only caught intermittently. Two pipelines
+    both load the SAME pending escalation into their own in-memory dict
+    at construction (as two long-running workers would); worker A then
+    resolves it. Worker B's in-memory copy is now stale - the lock alone
+    does not stop it from trying to resolve again, sequentially, since it
+    never re-checks whether someone else already finished it. This is
+    exactly the gap closed by the has_final_record()/_finalized_request_ids
+    check now at the top of _resolve_escalation_locked().
+    """
+
+    def test_a_stale_second_worker_is_refused_not_granted_again(self, db_factory, redis_server):
+        setup = _worker_pipeline(db_factory, redis_server)
+        setup.submit_request({**ESCALATING, "request_id": "req-stale-1"})
+
+        # Both workers load the SAME pending escalation now.
+        worker_a = _worker_pipeline(db_factory, redis_server)
+        worker_b = _worker_pipeline(db_factory, redis_server)
+        assert worker_b.has_pending_request("req-stale-1")
+
+        first = worker_a.resolve_escalation("req-stale-1", human_decision="approved")
+        assert first.status == "granted"
+
+        # worker_b's in-memory _pending_requests still (incorrectly) shows
+        # it as pending - this is the realistic stale-worker scenario.
+        second = worker_b.resolve_escalation("req-stale-1", human_decision="approved")
+
+        assert second.status == "error"
+        assert "already been finalized" in second.errors[0]
+        assert len(DatabaseAuditStore(db_factory).all()) == 1
+
+    def test_a_stale_worker_cannot_flip_an_approval_to_a_rejection_either(self, db_factory, redis_server):
+        setup = _worker_pipeline(db_factory, redis_server)
+        setup.submit_request({**ESCALATING, "request_id": "req-stale-2"})
+        worker_a = _worker_pipeline(db_factory, redis_server)
+        worker_b = _worker_pipeline(db_factory, redis_server)
+
+        worker_a.resolve_escalation("req-stale-2", human_decision="approved")
+        second = worker_b.resolve_escalation("req-stale-2", human_decision="rejected")
+
+        assert second.status == "error"
+        stored = DatabaseAuditStore(db_factory).all()
+        assert len(stored) == 1 and stored[0].final_decision == "GRANTED"
+
+
 class TestNoLockConfiguredIsUnaffected:
 
     def test_pipelines_without_a_lock_behave_exactly_as_before_day_80(self):

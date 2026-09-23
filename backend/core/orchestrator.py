@@ -439,6 +439,27 @@ class RequestPipeline:
             )
 
     def _resolve_escalation_locked(self, request_id: str, human_decision: str = None) -> PipelineResult:
+        # Day 80: a genuine multi-worker gap, found by testing (not by
+        # inspection) - each RequestPipeline restores pending escalations
+        # into its OWN in-memory dict once, at construction (Day 79). If
+        # worker A resolves request_id and worker B was never told (no
+        # process restart, just two long-running workers), worker B's
+        # in-memory copy is STALE: it still shows the request as pending
+        # even after worker A has finalized it in the database. The lock
+        # above only prevents worker A and B from resolving it AT THE
+        # SAME INSTANT - it does nothing to stop a later, purely
+        # sequential second resolution by a worker with stale state. This
+        # check closes that: the same guard submit_request() already had
+        # since Day 78, now applied here too.
+        if request_id in self._finalized_request_ids or (
+            self._audit_store is not None and self._audit_store.has_final_record(request_id)
+        ):
+            return PipelineResult(
+                request_id=request_id,
+                status="error",
+                errors=[f"Request {request_id} has already been finalized"],
+            )
+
         if request_id not in self._pending_requests:
             return PipelineResult(
                 request_id=request_id,
