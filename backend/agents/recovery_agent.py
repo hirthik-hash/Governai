@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from agents.base_agent import BaseAgent, AgentResult
 from fsm.states import RequestState, SystemState, TERMINAL_REQUEST_STATES
 from fsm.transitions import TRANSITIONS, SYSTEM_TRANSITIONS
+from core.distributed_lock import DistributedLock, LockAcquisitionError
 from fsm.recovery_fsm import RecoveryFSM
 
 
@@ -150,7 +151,12 @@ class FailureRecoveryAgent(BaseAgent):
     a RecoveryFSM instance based on the aggregate outcome.
     """
 
-    def __init__(self, checks: list = None, recovery_fsm: RecoveryFSM = None):
+    def __init__(
+        self,
+        checks: list = None,
+        recovery_fsm: RecoveryFSM = None,
+        distributed_lock: DistributedLock = None,
+    ):
         super().__init__()
         self._checks = checks or [
             check_database_connectivity,
@@ -158,6 +164,16 @@ class FailureRecoveryAgent(BaseAgent):
             check_fsm_integrity,
         ]
         self._recovery_fsm = recovery_fsm or RecoveryFSM()
+        # Day 81: when the RecoveryFSM's state is shared (Redis-backed),
+        # two workers could both call evaluate_and_transition() at nearly
+        # the same moment and race on the SAME transition - e.g. both
+        # reading SYSTEM_NORMAL and both trying to drive it to
+        # DEGRADED_WARNING, one clobbering the other's write. This lock
+        # (reusing core.distributed_lock.DistributedLock from Day 80)
+        # serializes the transition step across workers. None (the
+        # default, and every pre-Day-81 test) means no locking - fine for
+        # a single process, where there is no one else to race against.
+        self._distributed_lock = distributed_lock
 
     @property
     def agent_name(self) -> str:
@@ -204,12 +220,13 @@ class FailureRecoveryAgent(BaseAgent):
         }
 
         try:
-            new_state = self._recovery_fsm.transition(context)
-            transitioned = True
-        except Exception:
-            # No valid transition from the current RecoveryFSM state
-            # for this context (e.g. already healthy and nothing
-            # changed) - not an error, just nothing to do.
+            new_state, transitioned = self._locked_transition(context)
+        except LockAcquisitionError:
+            # Another worker is already evaluating/transitioning right
+            # now - not an error, just nothing for THIS call to do. The
+            # other worker's transition (if any) is still visible to us
+            # on the next read of self._recovery_fsm.state, since state
+            # is shared when a store is configured.
             new_state = self._recovery_fsm.state
             transitioned = False
 
@@ -224,3 +241,19 @@ class FailureRecoveryAgent(BaseAgent):
         )
 
         return self._success(data, reasoning)
+
+    def _locked_transition(self, context: dict):
+        """Runs the actual FSM transition, under the distributed lock if one is configured."""
+        if self._distributed_lock is None:
+            return self._try_transition(context)
+        with self._distributed_lock.acquire("recovery-fsm-transition"):
+            return self._try_transition(context)
+
+    def _try_transition(self, context: dict):
+        try:
+            return self._recovery_fsm.transition(context), True
+        except Exception:
+            # No valid transition from the current RecoveryFSM state for
+            # this context (e.g. already healthy and nothing changed) -
+            # not an error, just nothing to do.
+            return self._recovery_fsm.state, False

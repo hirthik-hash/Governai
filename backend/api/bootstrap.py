@@ -30,9 +30,12 @@ from database.credentials import DatabaseCredentialStore
 from database.audit_store import DatabaseAuditStore, PersistentDecisionLogger
 from database.pending_store import DatabasePendingEscalationStore
 from database.directory import DatabaseDirectory
+from database.recovery_state import RedisRecoveryStateStore
 from database.roles import DatabaseRoleStore
 from database.seeding import seed_database
 from database.session import check_schema, init_db, make_engine, make_session_factory, session_scope
+from fsm.recovery_fsm import RecoveryFSM
+from agents.recovery_agent import FailureRecoveryAgent
 
 
 def build_app(
@@ -103,8 +106,15 @@ def build_app(
     # unreachable, the app should fail to start rather than silently run
     # without the multi-worker safety it was configured to have.
     distributed_lock = DistributedLock(redis_client)
+    # Day 81: the system-health state itself is now shared too (not just
+    # per-request locking) - every worker sharing this Redis agrees on
+    # whether the system is in SAFE_MODE_ACTIVE, which the safe-mode gate
+    # (checked on every single request) depends on being a single, true
+    # answer rather than each worker's own private guess.
+    recovery_fsm = RecoveryFSM(state_store=RedisRecoveryStateStore(redis_client))
     pipeline = RequestPipeline(
         directory=directory,
+        recovery_fsm=recovery_fsm,
         session_validator=JwtSessionValidator(tokens),
         decision_logger=PersistentDecisionLogger(session_factory),
         audit_store=audit_store,
@@ -113,4 +123,9 @@ def build_app(
     )
     pipeline.audit_records = audit_store.all()  # restore the ledger's read path after a restart
 
-    return create_app(pipeline=pipeline, auth_service=auth_service)
+    # The lock ensures two workers evaluating health at once cannot both
+    # drive the same shared RecoveryFSM transition (Day 81 - the
+    # equivalent of Day 80's per-request lock, but for system health).
+    recovery_agent = FailureRecoveryAgent(recovery_fsm=recovery_fsm, distributed_lock=distributed_lock)
+
+    return create_app(pipeline=pipeline, recovery_agent=recovery_agent, auth_service=auth_service)
