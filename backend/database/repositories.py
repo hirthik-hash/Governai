@@ -29,7 +29,11 @@ from sqlalchemy.orm import Session
 from agents.audit_agent import AuditRecord
 from core.decision_logger import LogEntry, LogEntryType
 from data.seed_data import Resource, Sensitivity, User
-from database.models import AuditRecordModel, DecisionLogEntryModel, ResourceModel, UserModel
+from dataclasses import dataclass
+
+from database.models import (
+    AuditRecordModel, DecisionLogEntryModel, PolicyChunkModel, PolicyDocumentModel, ResourceModel, UserModel,
+)
 
 
 class RepositoryError(Exception):
@@ -272,3 +276,97 @@ class DecisionLogRepository:
         if condition is not None:
             statement = statement.where(condition)
         return [m.to_domain() for m in self._session.scalars(statement)]
+
+
+@dataclass(frozen=True)
+class PolicyDocument:
+    id: int
+    title: str
+    source_filename: str
+    uploaded_at: str
+    chunk_count: int
+
+
+@dataclass(frozen=True)
+class PolicyChunk:
+    document_id: int
+    chunk_index: int
+    text: str
+
+
+class PolicyRepository:
+    """
+    Days 86-88. Documents are advisory reference material for the Policy
+    Intelligence Agent - never fed to the FSM - so unlike the audit
+    ledger this repository allows real deletes (cascading to chunks,
+    enforced by the database's own FK, see database/models.py).
+    """
+
+    def __init__(self, session: Session):
+        self._session = session
+
+    def create_document(self, title: str, source_filename: str, uploaded_at: str, chunks: list[str]) -> int:
+        """
+        Creates the document and all of its chunks as one unit - a
+        document with zero chunks (a file that extracted nothing) is
+        allowed and stored as-is, since that is itself useful information
+        (this source produced nothing citable), not an error.
+        """
+        document = PolicyDocumentModel(title=title, source_filename=source_filename, uploaded_at=uploaded_at)
+        self._session.add(document)
+        self._session.flush()  # assigns document.id
+
+        self._session.add_all(
+            PolicyChunkModel(document_id=document.id, chunk_index=index, text=text)
+            for index, text in enumerate(chunks)
+        )
+        self._session.flush()
+        return document.id
+
+    def get_document(self, document_id: int) -> PolicyDocument:
+        model = self._session.get(PolicyDocumentModel, document_id)
+        if model is None:
+            raise RecordNotFoundError(f"No policy document with id {document_id}")
+        count = self._session.scalar(
+            select(func.count()).select_from(PolicyChunkModel).where(PolicyChunkModel.document_id == document_id)
+        )
+        return PolicyDocument(
+            id=model.id, title=model.title, source_filename=model.source_filename,
+            uploaded_at=model.uploaded_at, chunk_count=count,
+        )
+
+    def list_documents(self) -> list[PolicyDocument]:
+        statement = select(PolicyDocumentModel).order_by(PolicyDocumentModel.id)
+        return [self.get_document(m.id) for m in self._session.scalars(statement)]
+
+    def get_chunks(self, document_id: int) -> list[PolicyChunk]:
+        """Every chunk of one document, in chunk_index order - the order Q&A citations (Days 89-93) will reference."""
+        statement = (
+            select(PolicyChunkModel)
+            .where(PolicyChunkModel.document_id == document_id)
+            .order_by(PolicyChunkModel.chunk_index)
+        )
+        return [PolicyChunk(document_id=m.document_id, chunk_index=m.chunk_index, text=m.text) for m in self._session.scalars(statement)]
+
+    def get_chunk(self, document_id: int, chunk_index: int) -> PolicyChunk:
+        """A single chunk by its stable index - what a citation like '[Excerpt 4]' resolves to (Days 92-93)."""
+        model = self._session.scalar(
+            select(PolicyChunkModel).where(
+                PolicyChunkModel.document_id == document_id, PolicyChunkModel.chunk_index == chunk_index
+            )
+        )
+        if model is None:
+            raise RecordNotFoundError(f"No chunk {chunk_index} for document {document_id}")
+        return PolicyChunk(document_id=model.document_id, chunk_index=model.chunk_index, text=model.text)
+
+    def all_chunks(self) -> list[PolicyChunk]:
+        """Every chunk across every document, in document/chunk_index order - the retrieval agent's search space (Day 89)."""
+        statement = select(PolicyChunkModel).order_by(PolicyChunkModel.document_id, PolicyChunkModel.chunk_index)
+        return [PolicyChunk(document_id=m.document_id, chunk_index=m.chunk_index, text=m.text) for m in self._session.scalars(statement)]
+
+    def delete_document(self, document_id: int) -> None:
+        model = self._session.get(PolicyDocumentModel, document_id)
+        if model is None:
+            raise RecordNotFoundError(f"No policy document with id {document_id}")
+        self._session.delete(model)
+        self._session.flush()
