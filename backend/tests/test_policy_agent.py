@@ -197,3 +197,118 @@ class TestWithTheRealOllamaClient:
         assert result.data["answer"] == "The timeout is 30 minutes, per [Excerpt 1]."
         assert "[Excerpt 1] Escalation timeout is 30 minutes." in captured["prompt"]
         assert captured["model"] == "mistral"
+
+
+class TestCitationGrounding:
+    """Days 92-93: does the answer cite an excerpt that was actually retrieved?"""
+
+    def test_a_valid_citation_is_not_flagged(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="The timeout is 30 minutes, per [Excerpt 1].")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["citations_found"] == [1]
+        assert result.data["invalid_citations"] == []
+        assert result.data["grounding_warning"] is False
+
+    def test_a_citation_to_an_excerpt_that_was_never_retrieved_is_flagged(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])  # only ever produces Excerpt 1
+        ollama = FakeOllamaClient(default_response="See [Excerpt 1] and also [Excerpt 4] for details.")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["citations_found"] == [1, 4]
+        assert result.data["invalid_citations"] == [4]
+        assert result.data["grounding_warning"] is True
+
+    def test_an_answer_with_no_citations_at_all_is_not_a_grounding_warning(self, session_factory):
+        # Answering in its own words (or correctly saying it can't answer)
+        # is not the failure mode this check targets - only a fabricated
+        # reference is.
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="I'm not sure based on the provided material.")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["citations_found"] == []
+        assert result.data["grounding_warning"] is False
+
+    def test_multiple_invalid_citations_are_all_reported(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="Per [Excerpt 2] and [Excerpt 3], this is true.")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["invalid_citations"] == [2, 3]
+        assert result.data["grounding_warning"] is True
+
+    def test_a_repeated_valid_citation_is_deduplicated_not_flagged(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="[Excerpt 1] says 30 minutes. Again, see [Excerpt 1].")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["citations_found"] == [1]
+        assert result.data["grounding_warning"] is False
+
+    def test_citations_are_valid_up_to_the_actual_number_of_excerpts_retrieved(self, session_factory):
+        _seed_policy(session_factory, [
+            "Escalation routes to a manager.",
+            "Escalation timeout applies to restricted resources.",
+        ])
+        ollama = FakeOllamaClient(default_response="See [Excerpt 1] and [Excerpt 2].")
+        agent = PolicyIntelligenceAgent(ollama, session_factory, top_k=2)
+
+        result = agent.process({"question": "escalation timeout restricted"})
+
+        assert len(result.data["excerpts"]) == 2
+        assert result.data["invalid_citations"] == []
+
+    def test_a_citation_one_past_the_actual_excerpt_count_is_invalid(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])  # exactly 1 excerpt
+        ollama = FakeOllamaClient(default_response="Per [Excerpt 1] and [Excerpt 2].")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["invalid_citations"] == [2]
+
+    def test_grounding_warning_appears_in_the_reasoning_text(self, session_factory):
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="Per [Excerpt 9].")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert "WARNING" in result.reasoning
+        assert "[9]" in result.reasoning
+
+    def test_empty_library_and_no_match_paths_still_report_the_grounding_keys(self, session_factory):
+        empty_result = PolicyIntelligenceAgent(FakeOllamaClient(), session_factory).process({"question": "anything"})
+        assert empty_result.data["citations_found"] == []
+        assert empty_result.data["invalid_citations"] == []
+        assert empty_result.data["grounding_warning"] is False
+
+        _seed_policy(session_factory, ["Completely unrelated content."])
+        no_match_result = PolicyIntelligenceAgent(FakeOllamaClient(), session_factory).process({"question": "escalation timeout"})
+        assert no_match_result.data["grounding_warning"] is False
+
+    def test_citation_format_with_extra_whitespace_or_case_is_not_matched(self, session_factory):
+        # Deliberately strict: only the exact "[Excerpt N]" format the
+        # system prompt asks for counts as a citation. A model deviating
+        # from that format is a separate, softer problem (poor
+        # instruction-following) from fabricating a reference, and is not
+        # what this check claims to catch.
+        _seed_policy(session_factory, ["Escalation timeout is 30 minutes."])
+        ollama = FakeOllamaClient(default_response="See [excerpt 1] and [Excerpt1] and (Excerpt 1).")
+        agent = PolicyIntelligenceAgent(ollama, session_factory)
+
+        result = agent.process({"question": "escalation timeout"})
+
+        assert result.data["citations_found"] == []
