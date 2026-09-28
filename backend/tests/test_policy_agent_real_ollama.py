@@ -67,3 +67,35 @@ class TestRealEndToEndPolicyQA:
 
         assert result.data["grounded"] is True
         assert "five" in result.data["answer"].lower() or "5" in result.data["answer"]
+
+
+class TestRealEndToEndConflictDetection:
+
+    def test_a_real_numeric_conflict_between_two_documents_is_detected(self, session_factory, ollama_client, tmp_path):
+        make_pdf(tmp_path / "doc_a.pdf", ["Escalation timeout is exactly thirty minutes for restricted resources."])
+        make_pdf(tmp_path / "doc_b.pdf", ["Escalation timeout is exactly ninety minutes for restricted resources."])
+        with session_factory() as session:
+            ingest_document(session, "Doc A", str(tmp_path / "doc_a.pdf"))
+            ingest_document(session, "Doc B", str(tmp_path / "doc_b.pdf"))
+            session.commit()
+
+        agent = PolicyIntelligenceAgent(ollama_client, session_factory)
+        result = agent.detect_conflicts(min_shared_terms=3)
+
+        assert result.success is True
+        assert result.data["candidates_checked"] >= 1
+        assert len(result.data["conflicts"]) >= 1
+
+    def test_two_compatible_documents_on_different_topics_report_no_conflict(self, session_factory, ollama_client, tmp_path):
+        make_pdf(tmp_path / "doc_a.pdf", ["Vacation requests are approved by HR within five business days."])
+        make_pdf(tmp_path / "doc_b.pdf", ["Server backups run nightly at approximately 2am UTC."])
+        with session_factory() as session:
+            ingest_document(session, "Doc A", str(tmp_path / "doc_a.pdf"))
+            ingest_document(session, "Doc B", str(tmp_path / "doc_b.pdf"))
+            session.commit()
+
+        agent = PolicyIntelligenceAgent(ollama_client, session_factory)
+        result = agent.detect_conflicts(min_shared_terms=2)
+
+        assert result.success is True
+        assert result.data["conflicts"] == []

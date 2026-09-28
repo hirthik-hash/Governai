@@ -77,3 +77,8 @@ def retrieve_relevant_chunks(chunks: list[PolicyChunk], question: str, top_k: in
 
     scored.sort(key=lambda sc: (-sc.score, sc.chunk.document_id, sc.chunk.chunk_index))
     return scored[:top_k]
+
+
+def score_pair_overlap(text_a: str, text_b: str) -> frozenset[str]:
+    """The distinct terms shared between two texts, after the same tokenize()/stopword rules as retrieval (Days 94-95's conflict pre-filter)."""
+    return frozenset(tokenize(text_a) & tokenize(text_b))

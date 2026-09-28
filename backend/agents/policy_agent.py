@@ -50,10 +50,13 @@ from sqlalchemy.orm import sessionmaker
 
 from agents.base_agent import AgentResult, BaseAgent
 from ai.ollama_client import OllamaError
+from ai.policy_conflict import ConflictCandidate, find_candidate_pairs
 from ai.policy_retrieval import ScoredChunk, retrieve_relevant_chunks
 from database.repositories import PolicyRepository
 
 DEFAULT_TOP_K = 3
+DEFAULT_MIN_SHARED_TERMS = 3
+DEFAULT_MAX_CANDIDATES = 20
 
 _CITATION_PATTERN = re.compile(r"\[Excerpt (\d+)\]")
 
@@ -63,6 +66,16 @@ _SYSTEM_PROMPT = (
     "used with their exact label, like [Excerpt 1]. If the excerpts do not "
     "contain enough information to answer, say so plainly instead of "
     "guessing or using outside knowledge."
+)
+
+_CONFLICT_SYSTEM_PROMPT = (
+    "You compare two policy excerpts from DIFFERENT documents for a genuine "
+    "factual conflict - one saying something the other contradicts (e.g. "
+    "different numbers, different rules for the same situation). Excerpts on "
+    "related but different topics, or that simply do not overlap enough to "
+    "compare, are NOT a conflict. Respond with your verdict as the FIRST "
+    "word of your reply: either NO_CONFLICT or CONFLICT, followed by one "
+    "short sentence explaining why."
 )
 
 
@@ -160,3 +173,118 @@ class PolicyIntelligenceAgent(BaseAgent):
     def _build_prompt(self, question: str, excerpts: list[dict]) -> str:
         excerpt_block = "\n\n".join(f"[{e['label']}] {e['text']}" for e in excerpts)
         return f"{excerpt_block}\n\nQuestion: {question}"
+
+    def detect_conflicts(
+        self,
+        min_shared_terms: int = DEFAULT_MIN_SHARED_TERMS,
+        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    ) -> AgentResult:
+        """
+        Days 94-95. Finds cross-document chunk pairs that share enough
+        keywords to be worth checking (find_candidate_pairs, cheap, no
+        Ollama), then asks Ollama to judge ONLY those candidates - never
+        every possible pair, which would not scale.
+
+        data["conflicts"]           candidates Ollama judged CONFLICT
+        data["candidates_checked"]  how many candidate pairs were sent to Ollama
+        data["undetermined"]        candidates whose response could not
+                                     be parsed as either verdict - never
+                                     silently counted as NO_CONFLICT
+        data["chunks_considered"]   total chunks in the library at query time
+
+        max_candidates caps real cost (each candidate is one Ollama
+        call): candidates beyond the cap are simply not checked this run,
+        reported via data["candidates_skipped"] rather than silently
+        dropped.
+        """
+        session = self._session_factory()
+        try:
+            all_chunks = PolicyRepository(session).all_chunks()
+        finally:
+            session.close()
+
+        if len(all_chunks) < 2:
+            return self._success(
+                data=self._empty_conflict_data(len(all_chunks)),
+                reasoning=f"Only {len(all_chunks)} chunk(s) in the library - need at least 2 to compare.",
+            )
+
+        candidates = find_candidate_pairs(all_chunks, min_shared_terms=min_shared_terms)
+        if not candidates:
+            return self._success(
+                data=self._empty_conflict_data(len(all_chunks)),
+                reasoning=f"{len(all_chunks)} chunk(s) in the library, but no cross-document pair shared enough terms to check.",
+            )
+
+        to_check = candidates[:max_candidates]
+        skipped = len(candidates) - len(to_check)
+
+        conflicts = []
+        undetermined = 0
+        for candidate in to_check:
+            prompt = self._build_conflict_prompt(candidate)
+            try:
+                response = self._ollama.generate(prompt, system=_CONFLICT_SYSTEM_PROMPT)
+            except OllamaError as error:
+                return self._failure(f"Ollama call failed during conflict check: {error}", errors=[str(error)])
+
+            verdict = _parse_conflict_verdict(response)
+            if verdict is True:
+                conflicts.append(self._describe_conflict(candidate, response))
+            elif verdict is None:
+                undetermined += 1
+
+        reasoning = (
+            f"Checked {len(to_check)} candidate pair(s) out of {len(candidates)} found "
+            f"(from {len(all_chunks)} chunk(s) total): {len(conflicts)} conflict(s), {undetermined} undetermined."
+        )
+        if skipped:
+            reasoning += f" {skipped} candidate(s) were not checked (over the {max_candidates}-candidate cap)."
+
+        return self._success(
+            data={
+                "conflicts": conflicts,
+                "candidates_checked": len(to_check),
+                "candidates_skipped": skipped,
+                "undetermined": undetermined,
+                "chunks_considered": len(all_chunks),
+            },
+            reasoning=reasoning,
+        )
+
+    def _empty_conflict_data(self, chunks_considered: int) -> dict:
+        return {
+            "conflicts": [], "candidates_checked": 0, "candidates_skipped": 0,
+            "undetermined": 0, "chunks_considered": chunks_considered,
+        }
+
+    def _build_conflict_prompt(self, candidate: ConflictCandidate) -> str:
+        return (
+            f"Excerpt A (document {candidate.chunk_a.document_id}): {candidate.chunk_a.text}\n\n"
+            f"Excerpt B (document {candidate.chunk_b.document_id}): {candidate.chunk_b.text}"
+        )
+
+    def _describe_conflict(self, candidate: ConflictCandidate, ollama_response: str) -> dict:
+        return {
+            "document_a": candidate.chunk_a.document_id, "chunk_index_a": candidate.chunk_a.chunk_index,
+            "text_a": candidate.chunk_a.text,
+            "document_b": candidate.chunk_b.document_id, "chunk_index_b": candidate.chunk_b.chunk_index,
+            "text_b": candidate.chunk_b.text,
+            "shared_terms": sorted(candidate.shared_terms),
+            "ollama_explanation": ollama_response.strip(),
+        }
+
+
+def _parse_conflict_verdict(response: str) -> Optional[bool]:
+    """
+    True (CONFLICT), False (NO_CONFLICT), or None (unparseable - the
+    response was neither, or malformed). Checks NO_CONFLICT first: it
+    contains "CONFLICT" as a substring, so checking for plain "CONFLICT"
+    first would misread every legitimate NO_CONFLICT verdict as a conflict.
+    """
+    normalized = response.strip().upper()
+    if "NO_CONFLICT" in normalized or "NO CONFLICT" in normalized:
+        return False
+    if "CONFLICT" in normalized:
+        return True
+    return None
