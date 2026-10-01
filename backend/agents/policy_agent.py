@@ -52,7 +52,7 @@ from agents.base_agent import AgentResult, BaseAgent
 from ai.ollama_client import OllamaError
 from ai.policy_conflict import ConflictCandidate, find_candidate_pairs
 from ai.policy_retrieval import ScoredChunk, retrieve_relevant_chunks
-from database.repositories import PolicyRepository
+from database.repositories import AuditRecordRepository, PolicyRepository
 
 DEFAULT_TOP_K = 3
 DEFAULT_MIN_SHARED_TERMS = 3
@@ -77,6 +77,18 @@ _CONFLICT_SYSTEM_PROMPT = (
     "word of your reply: either NO_CONFLICT or CONFLICT, followed by one "
     "short sentence explaining why."
 )
+
+_EXPLANATION_SYSTEM_PROMPT = (
+    "You explain access-governance decisions in plain English for a "
+    "non-technical reader. Use ONLY the facts given below - do not invent "
+    "any additional reasons, numbers, or outcomes. State the final outcome "
+    "exactly as given; never claim the request was granted if it was denied, "
+    "or the reverse, and never claim a final outcome for a request that is "
+    "still pending. Keep it to two or three short sentences."
+)
+
+_GRANT_WORDS = ("granted", "approved", "allowed", "permitted")
+_DENY_WORDS = ("denied", "rejected", "blocked", "refused")
 
 
 def _extract_cited_excerpt_numbers(answer: str) -> list[int]:
@@ -258,6 +270,83 @@ class PolicyIntelligenceAgent(BaseAgent):
             "undetermined": 0, "chunks_considered": chunks_considered,
         }
 
+    def explain_decision(self, request_id: str) -> AgentResult:
+        """
+        Days 96-97. A plain-English narrative of why a specific access
+        decision was made, generated from the REAL recorded AuditRecord's
+        own fields and reasoning trail - never from the FSM or agents
+        directly, so this can never influence the decision it explains.
+
+        If a request has more than one audit record (e.g. blocked by safe
+        mode, then finalized later - see Day 78), the MOST RECENT one is
+        explained, since that is the request's actual current outcome.
+
+        data["outcome_consistent"] is the verification this project's own
+        design calls for: True unless the narrative's own wording
+        contradicts the real recorded final_decision (claims granted when
+        it was denied, or the reverse, or claims either when the real
+        record is still PENDING). This is a cheap keyword check, not a
+        semantic one - see _check_outcome_consistency() - consistent with
+        this agent's "cheap check before trusting the AI" pattern
+        throughout (retrieval, conflict detection).
+        """
+        session = self._session_factory()
+        try:
+            records = AuditRecordRepository(session).for_request(request_id)
+        finally:
+            session.close()
+
+        if not records:
+            return self._failure(
+                f"No audit record found for request_id {request_id}",
+                errors=[f"request_id {request_id} has no recorded decision"],
+            )
+        record = records[-1]
+
+        prompt = self._build_explanation_prompt(record)
+        try:
+            narrative = self._ollama.generate(prompt, system=_EXPLANATION_SYSTEM_PROMPT)
+        except OllamaError as error:
+            return self._failure(f"Ollama call failed during decision explanation: {error}", errors=[str(error)])
+
+        consistent = _check_outcome_consistency(record.final_decision, narrative)
+
+        reasoning = f"Explained request {request_id} (recorded outcome: {record.final_decision})."
+        if not consistent:
+            reasoning += " WARNING: the generated narrative's wording contradicts the recorded outcome."
+
+        return self._success(
+            data={
+                "request_id": request_id,
+                "narrative": narrative,
+                "final_decision": record.final_decision,
+                "outcome_consistent": consistent,
+                "records_found": len(records),
+            },
+            reasoning=reasoning,
+        )
+
+    def _build_explanation_prompt(self, record) -> str:
+        trail = "\n".join(f"- {line}" for line in record.agent_reasoning_trail) or "(no reasoning recorded)"
+        approver = record.approver_user_id or "(none - not escalated)"
+        policy_rule = record.policy_rule_cited or "(none cited)"
+        return (
+            f"Request: {record.request_id}\n"
+            f"Requesting user: {record.user_id}\n"
+            f"Resource: {record.resource_id}\n"
+            f"Action requested: {record.action_requested}\n"
+            f"Risk score: {record.risk_score} ({record.risk_level})\n"
+            f"Approver (if escalated): {approver}\n"
+            f"Policy rule cited: {policy_rule}\n"
+            f"Final recorded outcome: {record.final_decision}\n\n"
+            f"Reasoning trail recorded by the system, in order:\n{trail}\n\n"
+            "Explain in plain English why this decision was made."
+        )
+        return {
+            "conflicts": [], "candidates_checked": 0, "candidates_skipped": 0,
+            "undetermined": 0, "chunks_considered": chunks_considered,
+        }
+
     def _build_conflict_prompt(self, candidate: ConflictCandidate) -> str:
         return (
             f"Excerpt A (document {candidate.chunk_a.document_id}): {candidate.chunk_a.text}\n\n"
@@ -288,3 +377,26 @@ def _parse_conflict_verdict(response: str) -> Optional[bool]:
     if "CONFLICT" in normalized:
         return True
     return None
+
+
+def _check_outcome_consistency(final_decision: str, narrative: str) -> bool:
+    """
+    True if narrative's own wording does not contradict final_decision.
+    A GRANTED record is inconsistent only if the narrative uses deny
+    language WITHOUT also using grant language (mentioning a risk that
+    was overcome is fine; claiming the request was ultimately denied is
+    not). Symmetric for DENIED. A PENDING record is inconsistent if the
+    narrative claims EITHER a final grant or a final denial - a request
+    that has not concluded should not be narrated as if it had.
+    """
+    text = narrative.lower()
+    has_grant = any(word in text for word in _GRANT_WORDS)
+    has_deny = any(word in text for word in _DENY_WORDS)
+
+    if final_decision == "GRANTED":
+        return not (has_deny and not has_grant)
+    if final_decision == "DENIED":
+        return not (has_grant and not has_deny)
+    if final_decision == "PENDING":
+        return not (has_grant or has_deny)
+    return True

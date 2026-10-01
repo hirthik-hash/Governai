@@ -99,3 +99,64 @@ class TestRealEndToEndConflictDetection:
 
         assert result.success is True
         assert result.data["conflicts"] == []
+
+
+class TestRealEndToEndDecisionExplanation:
+    """
+    The most authentic proof for this feature: a REAL RequestPipeline
+    (Days 1-81) produces a REAL AuditRecord, stored via the real
+    AuditRecordRepository, then explained by a real local Ollama server -
+    tying the deterministic governance core to the advisory AI layer
+    exactly as this project's whole architecture intends.
+    """
+
+    def test_explains_a_real_granted_decision_from_the_real_pipeline(self, session_factory, ollama_client):
+        from core.orchestrator import RequestPipeline
+        from database.repositories import AuditRecordRepository
+        from database.seeding import seed_database
+
+        with session_factory() as seed_session:
+            seed_database(seed_session)  # audit_records.user_id/resource_id are real foreign keys
+            seed_session.commit()
+
+        pipeline = RequestPipeline()
+        result = pipeline.submit_request({
+            "request_id": "req-explain-real-1", "user_id": "user-007",
+            "resource_id": "resource-001", "session_token": "abc",
+        })
+        assert result.status == "granted"
+        with session_factory() as session:
+            AuditRecordRepository(session).add(result.audit_record)
+            session.commit()
+
+        agent = PolicyIntelligenceAgent(ollama_client, session_factory)
+        explanation = agent.explain_decision("req-explain-real-1")
+
+        assert explanation.success is True
+        assert explanation.data["outcome_consistent"] is True
+        assert len(explanation.data["narrative"]) > 0
+
+    def test_explains_a_real_denied_decision_from_the_real_pipeline(self, session_factory, ollama_client):
+        from core.orchestrator import RequestPipeline
+        from database.repositories import AuditRecordRepository
+        from database.seeding import seed_database
+
+        with session_factory() as seed_session:
+            seed_database(seed_session)  # audit_records.user_id/resource_id are real foreign keys
+            seed_session.commit()
+
+        pipeline = RequestPipeline()
+        result = pipeline.submit_request({
+            "request_id": "req-explain-real-2", "user_id": "user-009",  # blacklisted
+            "resource_id": "resource-001", "session_token": "abc",
+        })
+        assert result.status == "denied"
+        with session_factory() as session:
+            AuditRecordRepository(session).add(result.audit_record)
+            session.commit()
+
+        agent = PolicyIntelligenceAgent(ollama_client, session_factory)
+        explanation = agent.explain_decision("req-explain-real-2")
+
+        assert explanation.success is True
+        assert explanation.data["outcome_consistent"] is True
