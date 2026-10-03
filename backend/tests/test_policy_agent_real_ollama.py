@@ -65,6 +65,7 @@ class TestRealEndToEndPolicyQA:
         agent = PolicyIntelligenceAgent(ollama_client, session_factory)
         result = agent.process({"question": "How many business days for vacation approval?"})
 
+        assert result.success is True
         assert result.data["grounded"] is True
         assert "five" in result.data["answer"].lower() or "5" in result.data["answer"]
 
