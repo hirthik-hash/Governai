@@ -38,9 +38,52 @@ mode of a model inventing a reference to material it was never shown -
 "only trusts [Excerpt N] markers pointing at chunks actually retrieved"
 in this project's own original design language for this agent.
 
-Conflict detection (Days 94-95) and decision explanation (Days 96-97)
-are separate methods added to this same class later, sharing the same
-injected dependencies.
+Conflict detection (Days 94-95, detect_conflicts()) and decision
+explanation (Days 96-97, explain_decision()) are separate methods on
+this same class, sharing the same injected dependencies (an Ollama
+client and a session_factory - nothing else).
+
+Day 98 (Phase 4 close-out): what is real, what is deliberately
+simplified, and what is a genuine known gap, stated plainly per this
+project's own convention for closing a phase.
+
+Real and verified:
+  - every method tested against FakeOllamaClient (logic), the real
+    OllamaClient via httpx.MockTransport (the real HTTP code path), and
+    a genuine local Ollama server when reachable (test_policy_agent_
+    real_ollama.py, test_policy_agent_integration.py's
+    TestFullRealWorkflow) - including a full Q&A -> conflict detection
+    -> real-pipeline-decision -> explanation sequence against one
+    shared library with a real model (mistral:7b-instruct in this
+    project's own testing);
+  - the agent holds no mutable state between calls - verified
+    empirically (TestAgentHoldsNoStateBetweenCalls), not just claimed;
+  - citation grounding and outcome-consistency checks are real, cheap,
+    keyword-level verifications with mutation-tested logic (see Days
+    92-93 and 96-97's own test suites), not merely trusted LLM output.
+
+Deliberately simplified (documented, not hidden):
+  - retrieval is keyword overlap, no stemming, no embeddings - the
+    "cheap check before the AI" principle applied throughout this
+    project (Agent 1's non-NLP design, retrieval, conflict detection);
+  - citation grounding checks ONLY that a cited excerpt number existed
+    - never the accuracy of what the model claims about it;
+  - outcome-consistency checking is a keyword check (grant/deny/pending
+    vocabulary), not semantic understanding of the narrative.
+
+Known, real gaps (not yet built):
+  - no caching: every call re-reads the full chunk list from the
+    database and re-tokenizes it, which is fine at today's library
+    sizes and would need revisiting at real scale;
+  - detect_conflicts() is never scheduled or triggered automatically -
+    nothing in RequestPipeline or the API calls it; it is a library
+    function an operator or a future API route would invoke;
+  - no API routes exist yet for any of these four capabilities (Q&A,
+    conflict detection, explanation) - they are only reachable as
+    direct Python calls today, which is consistent with this agent
+    being advisory-only and outside RequestPipeline's own request path,
+    but means a human still has to invoke them manually or through
+    tooling built on top, which does not yet exist.
 """
 
 import re
