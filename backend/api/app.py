@@ -30,6 +30,7 @@ Run a SINGLE uvicorn worker until state moves to Redis/DB (Days 80-81).
 import secrets
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import sessionmaker
 
 from agents.policy_agent import PolicyIntelligenceAgent
@@ -54,6 +55,7 @@ def create_app(
     auth_service: AuthService = None,
     policy_agent: PolicyIntelligenceAgent = None,
     session_factory: sessionmaker = None,
+    cors_origins: list[str] = None,
 ) -> FastAPI:
     app = FastAPI(
         title="GovernAI",
@@ -80,6 +82,21 @@ def create_app(
     # Day 100: the database behind the policy library. None means the
     # /policy/documents routes answer 503.
     app.state.session_factory = session_factory
+
+    # Day 101: browser access. None/empty means no CORS headers at all (the
+    # safe default for tests and bare apps). Credentials stay OFF - callers
+    # authenticate with a bearer token in a header, not a cookie - and the
+    # allowed headers are exactly the ones the API reads.
+    if cors_origins:
+        if "*" in cors_origins:
+            raise ValueError("cors_origins must list explicit origins; '*' is not allowed")
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(cors_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     app.include_router(public_health_router)
     app.include_router(auth_router)

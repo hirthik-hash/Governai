@@ -144,4 +144,5 @@ def build_app(
         auth_service=auth_service,
         policy_agent=policy_agent,
         session_factory=session_factory,
+        cors_origins=app_settings.cors_allowed_origins,
     )

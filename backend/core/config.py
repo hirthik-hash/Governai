@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
 
+    # Browser origins allowed to call the API (Day 101). In .env this is
+    # JSON, e.g. CORS_ALLOWED_ORIGINS=["https://app.example.com"]. Never "*":
+    # create_app() refuses it.
+    cors_allowed_origins: list[str] = ["http://localhost:3000"]
+
     # Governance thresholds - mirrors the constants currently
     # hardcoded in fsm/transitions.py. Not wired in yet (see note
     # below); this just gives them one obvious future home.
