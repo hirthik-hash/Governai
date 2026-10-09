@@ -17,6 +17,7 @@ unauthenticated caller always gets 401, never a hint about the body.
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy.orm import sessionmaker
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from agents.policy_agent import PolicyIntelligenceAgent
@@ -34,6 +35,19 @@ _UNAUTHENTICATED = {"WWW-Authenticate": "Bearer"}
 
 def get_pipeline(request: Request) -> RequestPipeline:
     return request.app.state.pipeline
+
+
+def get_session_factory(request: Request) -> sessionmaker:
+    """
+    The database session factory (Day 100), or 503 if this app was built
+    without one. Routes list their authentication dependency BEFORE this
+    one, so an unauthenticated caller gets 401 and never learns whether
+    the policy library is configured.
+    """
+    factory = getattr(request.app.state, "session_factory", None)
+    if factory is None:
+        raise HTTPException(status_code=503, detail="Policy library is not configured")
+    return factory
 
 
 def get_recovery_agent(request: Request) -> FailureRecoveryAgent:

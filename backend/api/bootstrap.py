@@ -143,4 +143,5 @@ def build_app(
         recovery_agent=recovery_agent,
         auth_service=auth_service,
         policy_agent=policy_agent,
+        session_factory=session_factory,
     )

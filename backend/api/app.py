@@ -30,6 +30,7 @@ Run a SINGLE uvicorn worker until state moves to Redis/DB (Days 80-81).
 import secrets
 
 from fastapi import FastAPI
+from sqlalchemy.orm import sessionmaker
 
 from agents.policy_agent import PolicyIntelligenceAgent
 from agents.recovery_agent import FailureRecoveryAgent
@@ -38,6 +39,7 @@ from api.routes.auth import router as auth_router
 from api.routes.health import public_router as public_health_router
 from api.routes.health import router as health_router
 from api.routes.policy import router as policy_router
+from api.routes.policy_documents import router as policy_documents_router
 from api.routes.requests import router as requests_router
 from auth.credentials import InMemoryCredentialStore
 from auth.passwords import PasswordService
@@ -51,6 +53,7 @@ def create_app(
     recovery_agent: FailureRecoveryAgent = None,
     auth_service: AuthService = None,
     policy_agent: PolicyIntelligenceAgent = None,
+    session_factory: sessionmaker = None,
 ) -> FastAPI:
     app = FastAPI(
         title="GovernAI",
@@ -74,6 +77,9 @@ def create_app(
 
     # Day 99: advisory only. None means the /policy routes answer 503.
     app.state.policy_agent = policy_agent
+    # Day 100: the database behind the policy library. None means the
+    # /policy/documents routes answer 503.
+    app.state.session_factory = session_factory
 
     app.include_router(public_health_router)
     app.include_router(auth_router)
@@ -81,4 +87,5 @@ def create_app(
     app.include_router(requests_router)
     app.include_router(audit_router)
     app.include_router(policy_router)
+    app.include_router(policy_documents_router)
     return app
