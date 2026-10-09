@@ -35,7 +35,9 @@ from database.roles import DatabaseRoleStore
 from database.seeding import seed_database
 from database.session import check_schema, init_db, make_engine, make_session_factory, session_scope
 from fsm.recovery_fsm import RecoveryFSM
+from agents.policy_agent import PolicyIntelligenceAgent
 from agents.recovery_agent import FailureRecoveryAgent
+from ai.ollama_client import OllamaClient
 
 
 def build_app(
@@ -128,4 +130,17 @@ def build_app(
     # equivalent of Day 80's per-request lock, but for system health).
     recovery_agent = FailureRecoveryAgent(recovery_fsm=recovery_fsm, distributed_lock=distributed_lock)
 
-    return create_app(pipeline=pipeline, recovery_agent=recovery_agent, auth_service=auth_service)
+    # Day 99: the advisory Policy Intelligence Agent. Building the client
+    # does not contact Ollama, so an Ollama outage never prevents startup;
+    # it only makes the /policy routes answer 503.
+    policy_agent = PolicyIntelligenceAgent(
+        OllamaClient(app_settings.ollama_base_url, app_settings.ollama_model),
+        session_factory,
+    )
+
+    return create_app(
+        pipeline=pipeline,
+        recovery_agent=recovery_agent,
+        auth_service=auth_service,
+        policy_agent=policy_agent,
+    )

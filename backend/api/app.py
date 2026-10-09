@@ -31,11 +31,13 @@ import secrets
 
 from fastapi import FastAPI
 
+from agents.policy_agent import PolicyIntelligenceAgent
 from agents.recovery_agent import FailureRecoveryAgent
 from api.routes.audit import router as audit_router
 from api.routes.auth import router as auth_router
 from api.routes.health import public_router as public_health_router
 from api.routes.health import router as health_router
+from api.routes.policy import router as policy_router
 from api.routes.requests import router as requests_router
 from auth.credentials import InMemoryCredentialStore
 from auth.passwords import PasswordService
@@ -48,6 +50,7 @@ def create_app(
     pipeline: RequestPipeline = None,
     recovery_agent: FailureRecoveryAgent = None,
     auth_service: AuthService = None,
+    policy_agent: PolicyIntelligenceAgent = None,
 ) -> FastAPI:
     app = FastAPI(
         title="GovernAI",
@@ -69,9 +72,13 @@ def create_app(
         tokens=TokenService(secrets.token_urlsafe(48)),
     )
 
+    # Day 99: advisory only. None means the /policy routes answer 503.
+    app.state.policy_agent = policy_agent
+
     app.include_router(public_health_router)
     app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(requests_router)
     app.include_router(audit_router)
+    app.include_router(policy_router)
     return app

@@ -19,6 +19,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from agents.policy_agent import PolicyIntelligenceAgent
 from agents.recovery_agent import FailureRecoveryAgent
 from auth.errors import AuthenticationError
 from auth.service import AuthService, Principal
@@ -41,6 +42,19 @@ def get_recovery_agent(request: Request) -> FailureRecoveryAgent:
 
 def get_auth_service(request: Request) -> AuthService:
     return request.app.state.auth_service
+
+
+def get_policy_agent(request: Request) -> PolicyIntelligenceAgent:
+    """
+    The advisory Policy Intelligence Agent (Day 99), or 503 if this app
+    was built without one. Routes list their authentication dependency
+    BEFORE this one, so an unauthenticated caller gets 401 and never
+    learns whether the AI layer is configured.
+    """
+    agent = getattr(request.app.state, "policy_agent", None)
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Policy intelligence is not configured")
+    return agent
 
 
 def get_current_principal(
